@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+macos-app/.build/
+macos-app/.vendor/
+DerivedData/
+*.xcodeproj/xcuserdata/
+.swiftpm/
+__pycache__/
+*.pyc
+.venv/
+artifacts/generated/
