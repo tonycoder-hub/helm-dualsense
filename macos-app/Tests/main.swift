@@ -123,6 +123,248 @@ let decodedMapping = try! JSONDecoder().decode(ControllerMapping.self, from: map
 expect(decodedMapping == .standard, "controller mapping should persist losslessly")
 expect(ControlMath.maximumTimerGap == 0.250, "timer-gap contract changed unexpectedly")
 
+func testIsolatedInputAvoidsBluetoothDefault() {
+  let bluetooth = AudioInputDevice(
+    id: 101,
+    name: "Bluetooth headset",
+    isDefault: true,
+    transport: .bluetooth
+  )
+  let builtIn = AudioInputDevice(
+    id: 102,
+    name: "Built-in microphone",
+    isDefault: false,
+    transport: .builtIn
+  )
+
+  let selected = AudioInputCatalog.preferredInput(
+    from: [bluetooth, builtIn],
+    protectPlayback: true
+  )
+  expect(selected?.id == builtIn.id, "isolated capture should avoid a Bluetooth default mic")
+}
+
+testIsolatedInputAvoidsBluetoothDefault()
+
+func testEnablingPlaybackProtectionStopsActiveBluetoothCapture() {
+  let bluetooth = AudioInputDevice(
+    id: 201,
+    name: "Bluetooth headset",
+    isDefault: true,
+    transport: .bluetooth
+  )
+  let builtIn = AudioInputDevice(
+    id: 202,
+    name: "Built-in microphone",
+    isDefault: false,
+    transport: .builtIn
+  )
+  let plan = AudioInputCatalog.playbackProtectionPlan(
+    selected: bluetooth,
+    from: [bluetooth, builtIn],
+    captureActive: true
+  )
+  expect(plan?.replacement?.id == builtIn.id, "playback protection should select a safe mic")
+  expect(
+    plan?.shouldStopCapture == true,
+    "playback protection must stop an already-running Bluetooth capture"
+  )
+}
+
+testEnablingPlaybackProtectionStopsActiveBluetoothCapture()
+
+func testTextAreaFallsBackToUnicodeKeyboardEvents() {
+  let decision = TextInsertionPolicy.decision(
+    secureInputEnabled: false,
+    secureField: false,
+    focusedRole: "AXTextArea",
+    selectedTextSettable: false
+  )
+  expect(
+    decision == .unicodeKeyboardEvents,
+    "editable focused text should use a non-clipboard keyboard fallback"
+  )
+}
+
+testTextAreaFallsBackToUnicodeKeyboardEvents()
+
+func testSecureInputRefusesEveryInsertionPath() {
+  let decision = TextInsertionPolicy.decision(
+    secureInputEnabled: true,
+    secureField: false,
+    focusedRole: "AXTextArea",
+    selectedTextSettable: true
+  )
+  expect(decision == .refused, "secure input must block AX and keyboard insertion")
+}
+
+testSecureInputRefusesEveryInsertionPath()
+
+func testSecureFieldRefusesEveryInsertionPath() {
+  let decision = TextInsertionPolicy.decision(
+    secureInputEnabled: false,
+    secureField: true,
+    focusedRole: "AXTextField",
+    selectedTextSettable: true
+  )
+  expect(decision == .refused, "secure text fields must block AX and keyboard insertion")
+}
+
+testSecureFieldRefusesEveryInsertionPath()
+
+func testWritableSelectedTextUsesAccessibilityInsertion() {
+  let decision = TextInsertionPolicy.decision(
+    secureInputEnabled: false,
+    secureField: false,
+    focusedRole: "AXTextArea",
+    selectedTextSettable: true
+  )
+  expect(
+    decision == .accessibilitySelectedText,
+    "writable selected text should keep the direct Accessibility insertion path"
+  )
+}
+
+testWritableSelectedTextUsesAccessibilityInsertion()
+
+func testUnicodeFallbackIsReportedAsUnconfirmedDispatch() {
+  expect(
+    TextInsertionPolicy.deliveryConfidence(for: .unicodeKeyboardEvents) == .unconfirmedDispatch,
+    "Unicode keyboard events must not be reported as a confirmed insertion"
+  )
+}
+
+testUnicodeFallbackIsReportedAsUnconfirmedDispatch()
+
+func testShortcutSettingsPersistLosslessly() {
+  let settings = ControllerShortcutSettings.standard
+  let data = try! JSONEncoder().encode(settings)
+  let decoded = try! JSONDecoder().decode(ControllerShortcutSettings.self, from: data)
+  expect(decoded == settings, "external input-method shortcut slots should persist losslessly")
+}
+
+testShortcutSettingsPersistLosslessly()
+
+func testControllerMappingAcceptsShortcutActions() {
+  var mapping = ControllerMapping.standard
+  mapping.create = .shortcut1
+  let data = try! JSONEncoder().encode(mapping)
+  let decoded = try! JSONDecoder().decode(ControllerMapping.self, from: data)
+  expect(decoded == mapping, "controller buttons should persist external shortcut actions")
+}
+
+testControllerMappingAcceptsShortcutActions()
+
+func testFullL2BrakeUsesConfiguredMinimumSpeed() {
+  let multiplier = ControlMath.racingSpeedMultiplier(
+    brake: 1,
+    accelerator: 0,
+    minimumSpeed: 0.25,
+    maximumSpeed: 3
+  )
+  expect(abs(multiplier - 0.25) < 0.001, "full L2 should brake to the configured minimum")
+}
+
+testFullL2BrakeUsesConfiguredMinimumSpeed()
+
+func testFullR2AcceleratorUsesConfiguredMaximumSpeed() {
+  let multiplier = ControlMath.racingSpeedMultiplier(
+    brake: 0,
+    accelerator: 1,
+    minimumSpeed: 0.25,
+    maximumSpeed: 3
+  )
+  expect(abs(multiplier - 3) < 0.001, "full R2 should accelerate to the configured maximum")
+}
+
+testFullR2AcceleratorUsesConfiguredMaximumSpeed()
+
+func testShortcutKeysResolveToMacVirtualKeyCodes() {
+  expect(ShortcutKey.d.virtualKeyCode == 2, "shortcut D should use the macOS ANSI D key code")
+  expect(ShortcutKey.space.virtualKeyCode == 49, "shortcut Space should use key code 49")
+}
+
+testShortcutKeysResolveToMacVirtualKeyCodes()
+
+func testShortcutKeysExposeReadableTitles() {
+  expect(ShortcutKey.returnKey.title == "Return", "shortcut picker should name the Return key")
+}
+
+testShortcutKeysExposeReadableTitles()
+
+func testShortcutDefinitionBuildsMacStyleLabel() {
+  expect(
+    ControllerShortcutSettings.standard.slot1.label == "⌃⌥D",
+    "shortcut labels should expose their modifiers and key"
+  )
+}
+
+testShortcutDefinitionBuildsMacStyleLabel()
+
+func testHelmActivationPreservesLastExternalFocusOwner() {
+  var history = ExternalFocusHistory()
+  history.recordActivation(processIdentifier: 42, helmProcessIdentifier: 10)
+  history.recordActivation(processIdentifier: 10, helmProcessIdentifier: 10)
+  expect(
+    history.restorationTarget(
+      currentProcessIdentifier: 10,
+      helmProcessIdentifier: 10
+    ) == 42,
+    "on-screen PTT should be able to restore the last external focus owner"
+  )
+}
+
+testHelmActivationPreservesLastExternalFocusOwner()
+
+func testEmptyFocusHistoryFallsBackToWindowOrder() {
+  let history = ExternalFocusHistory()
+  let targets = history.restorationTargets(
+    currentProcessIdentifier: 10,
+    helmProcessIdentifier: 10,
+    fallbackProcessIdentifiers: [10, 77, 77, 0, 88]
+  )
+  expect(
+    targets == [77, 88],
+    "first-run on-screen PTT should fall back to external front-to-back window owners"
+  )
+}
+
+testEmptyFocusHistoryFallsBackToWindowOrder()
+
+func testCancelledVoiceTestGenerationCannotAffectNextSession() {
+  var generation = VoiceTestSessionGeneration()
+  let cancelled = generation.begin()
+  generation.invalidate()
+  let replacement = generation.begin()
+  expect(
+    !generation.accepts(cancelled),
+    "a cancelled UI PTT callback must not affect the next voice session"
+  )
+  expect(generation.accepts(replacement), "the replacement UI PTT token should remain current")
+}
+
+testCancelledVoiceTestGenerationCannotAffectNextSession()
+
+func testCombinedAccelerationHasAnAbsolutePointerSpeedCap() {
+  let delta = ControlMath.stickPointerDelta(
+    x: 1,
+    y: 0,
+    deadZone: ControlMath.stickDeadZone,
+    gain: 2.2 * 4,
+    maximumSpeed: ControlMath.stickPointerMaximumSpeed,
+    holdDuration: 99,
+    accelerationDuration: 0.4,
+    maximumBoost: 3,
+    deltaTime: 1.0 / 60.0
+  )
+  expect(
+    hypot(delta.x, delta.y) <= ControlMath.stickPointerAbsoluteMaximumSpeed / 60 + 0.001,
+    "pointer gain, hold boost, and R2 acceleration must share a final speed cap"
+  )
+}
+
+testCombinedAccelerationHasAnAbsolutePointerSpeedCap()
+
 let audioInputs = AudioInputCatalog.devices()
 expect(!audioInputs.isEmpty, "at least one Mac-supported audio input should be discoverable")
 expect(audioInputs.contains(where: { $0.isDefault }), "default audio input should be identified")

@@ -10,11 +10,28 @@ struct RenderSnapshot {
     }
     let model = AppModel()
     model.statusMessage = "界面预览：启动默认停用，等待连接 DualSense。"
+    model.audioDevices = [
+      AudioInputDevice(
+        id: 1,
+        name: "MacBook Pro 麦克风",
+        isDefault: false,
+        transport: .builtIn
+      ),
+      AudioInputDevice(
+        id: 2,
+        name: "AirPods 麦克风",
+        isDefault: true,
+        transport: .bluetooth
+      ),
+    ]
+    model.selectedAudioDeviceID = 1
+    model.leftTriggerValue = 0.35
+    model.rightTriggerValue = 0.55
     let root = ControlCenterView()
       .environmentObject(model)
-      .frame(width: 780, height: 980)
+      .frame(width: 780, height: 1_500)
     let hostingView = NSHostingView(rootView: root)
-    hostingView.frame = NSRect(x: 0, y: 0, width: 780, height: 980)
+    hostingView.frame = NSRect(x: 0, y: 0, width: 780, height: 1_500)
     hostingView.layoutSubtreeIfNeeded()
 
     guard let representation = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds)

@@ -14,6 +14,7 @@ one compact desktop controller.
 | Cross | Left click / hold to drag |
 | Circle | Right click / hold to drag |
 | Right stick up/down | Smooth scrolling |
+| L2 / R2 | Brake / accelerate pointer and scrolling |
 | D-pad up/down | Page navigation |
 | Microphone button | Push to talk |
 | Hold Options, then press touchpad within two seconds | Enable / emergency stop |
@@ -24,9 +25,15 @@ deliberately slower and capped for precision. The acceleration duration and
 maximum boost are configurable and shown as a live curve.
 
 Cross, Circle, Create, D-pad up/down, and the microphone button can each be
-mapped to left click, right click, page up/down, PTT, or no action. Mappings and
-motion settings persist across launches. The safety chord is intentionally
-fixed and cannot be remapped.
+mapped to left click, right click, page up/down, PTT, one of three configurable
+keyboard shortcuts, or no action. The shortcut slots can invoke an external
+input method without bringing Helm to the foreground. Mappings and motion
+settings persist across launches. The safety chord is intentionally fixed and
+cannot be remapped.
+
+L2 acts like a racing-game brake and R2 acts like an accelerator. Their minimum
+and maximum multipliers are configurable and apply to left-stick/touchpad
+pointer movement and right-stick scrolling.
 
 Controller polling defaults to 120 Hz and can be changed to 60, 90, 120, 144,
 or 240 Hz. Pointer movement is integrated using elapsed time, so changing the
@@ -43,15 +50,25 @@ polling rate affects smoothness rather than speed.
 - Pending Speech callbacks are cancelled on emergency stop.
 - Microphone and Speech permissions are requested sequentially, and an
   interrupted on-screen PTT test is cancelled instead of remaining stuck.
-- Recognized text is inserted only through the focused Accessibility text
-  element. Secure Input and secure text fields are refused; the clipboard is
-  never used as a fallback.
+- Recognized text first uses the focused Accessibility text element, then uses
+  Unicode keyboard events for supported editable fields that reject direct AX
+  insertion. Secure Input and secure text fields are refused; the clipboard is
+  never used as a fallback. Direct AX insertion is reported as confirmed;
+  Unicode event delivery is explicitly reported as unconfirmed because the
+  target application may ignore it.
 
 ## Voice limitation
 
 The DualSense microphone button is used as the PTT control. Audio is captured
 from the macOS-supported input explicitly selected in Helm. The app does not
 claim that the controller's built-in microphone is available as a Mac input.
+
+Playback protection is enabled by default. If the system default input is a
+Bluetooth headset microphone, Helm selects a built-in or USB input instead;
+opening a classic Bluetooth microphone can switch the headset into its call
+profile and interrupt or degrade music. The protection can be disabled
+explicitly when that tradeoff is desired. Enabling protection during an active
+Bluetooth capture immediately cancels that capture before switching the picker.
 
 ## Requirements
 

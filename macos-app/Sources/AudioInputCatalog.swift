@@ -3,13 +3,73 @@ import AudioToolbox
 import CoreAudio
 import Foundation
 
+enum AudioInputTransport: String, Hashable {
+  case builtIn
+  case usb
+  case bluetooth
+  case bluetoothLE
+  case virtual
+  case continuity
+  case other
+
+  var mayInterruptPlayback: Bool {
+    self == .bluetooth || self == .bluetoothLE
+  }
+
+  var label: String {
+    switch self {
+    case .builtIn: return "内置"
+    case .usb: return "USB"
+    case .bluetooth, .bluetoothLE: return "蓝牙"
+    case .virtual: return "虚拟"
+    case .continuity: return "连续互通"
+    case .other: return "其他"
+    }
+  }
+}
+
 struct AudioInputDevice: Identifiable, Hashable {
   let id: AudioDeviceID
   let name: String
   let isDefault: Bool
+  let transport: AudioInputTransport
+
+  var mayInterruptPlayback: Bool { transport.mayInterruptPlayback }
+}
+
+struct AudioPlaybackProtectionPlan {
+  let replacement: AudioInputDevice?
+  let shouldStopCapture: Bool
 }
 
 enum AudioInputCatalog {
+  static func preferredInput(
+    from devices: [AudioInputDevice],
+    protectPlayback: Bool
+  ) -> AudioInputDevice? {
+    guard protectPlayback else {
+      return devices.first(where: \.isDefault) ?? devices.first
+    }
+
+    let safe = devices.filter { !$0.transport.mayInterruptPlayback }
+    return safe.first(where: \.isDefault)
+      ?? safe.first(where: { $0.transport == .builtIn })
+      ?? safe.first(where: { $0.transport == .usb })
+      ?? safe.first
+  }
+
+  static func playbackProtectionPlan(
+    selected: AudioInputDevice,
+    from devices: [AudioInputDevice],
+    captureActive: Bool
+  ) -> AudioPlaybackProtectionPlan? {
+    guard selected.mayInterruptPlayback else { return nil }
+    return AudioPlaybackProtectionPlan(
+      replacement: preferredInput(from: devices, protectPlayback: true),
+      shouldStopCapture: captureActive
+    )
+  }
+
   static func devices() -> [AudioInputDevice] {
     let defaultID = defaultInputDeviceID()
     var address = AudioObjectPropertyAddress(
@@ -47,7 +107,8 @@ enum AudioInputCatalog {
       return AudioInputDevice(
         id: identifier,
         name: name,
-        isDefault: defaultID.map { identifier == $0 } ?? false
+        isDefault: defaultID.map { identifier == $0 } ?? false,
+        transport: transportType(identifier)
       )
     }
     .sorted {
@@ -116,6 +177,37 @@ enum AudioInputCatalog {
     }
     guard status == noErr, let unmanagedName else { return nil }
     return unmanagedName.takeUnretainedValue() as String
+  }
+
+  private static func transportType(_ deviceID: AudioDeviceID) -> AudioInputTransport {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyTransportType,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var value = UInt32(kAudioDeviceTransportTypeUnknown)
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr else {
+      return .other
+    }
+
+    switch value {
+    case kAudioDeviceTransportTypeBuiltIn:
+      return .builtIn
+    case kAudioDeviceTransportTypeUSB:
+      return .usb
+    case kAudioDeviceTransportTypeBluetooth:
+      return .bluetooth
+    case kAudioDeviceTransportTypeBluetoothLE:
+      return .bluetoothLE
+    case kAudioDeviceTransportTypeVirtual:
+      return .virtual
+    case kAudioDeviceTransportTypeContinuityCaptureWired,
+      kAudioDeviceTransportTypeContinuityCaptureWireless:
+      return .continuity
+    default:
+      return .other
+    }
   }
 }
 

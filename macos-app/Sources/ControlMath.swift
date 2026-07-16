@@ -6,6 +6,7 @@ enum ControlMath {
   static let safetyChordWindow: TimeInterval = 2.0
   static let stickDeadZone = 0.16
   static let stickPointerMaximumSpeed = 1_100.0
+  static let stickPointerAbsoluteMaximumSpeed = 4_800.0
   static let stickAccelerationDelay = 0.25
 
   static func safetyChordIsValid(
@@ -85,7 +86,11 @@ enum ControlMath {
       accelerationDuration: accelerationDuration,
       maximumBoost: maximumBoost
     )
-    let distance = maximumSpeed * max(gain, 0) * shapedMagnitude * boost * elapsed
+    let effectiveSpeed = min(
+      maximumSpeed * max(gain, 0) * boost,
+      stickPointerAbsoluteMaximumSpeed
+    )
+    let distance = effectiveSpeed * shapedMagnitude * elapsed
     return CGPoint(
       x: x / rawMagnitude * distance,
       y: y / rawMagnitude * distance
@@ -104,5 +109,20 @@ enum ControlMath {
     let progress = min(max((holdDuration - delay) / duration, 0), 1)
     let smoothstep = progress * progress * (3 - 2 * progress)
     return 1 + (safeMaximum - 1) * smoothstep
+  }
+
+  static func racingSpeedMultiplier(
+    brake: Double,
+    accelerator: Double,
+    minimumSpeed: Double,
+    maximumSpeed: Double
+  ) -> Double {
+    let brakeAmount = min(max(brake, 0), 1)
+    let acceleratorAmount = min(max(accelerator, 0), 1)
+    let minimum = min(max(minimumSpeed, 0.05), 1)
+    let maximum = max(maximumSpeed, 1)
+    let brakeScale = 1 - (1 - minimum) * brakeAmount
+    let acceleratorScale = 1 + (maximum - 1) * acceleratorAmount
+    return brakeScale * acceleratorScale
   }
 }

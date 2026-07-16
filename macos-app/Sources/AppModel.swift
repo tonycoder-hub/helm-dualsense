@@ -24,6 +24,12 @@ final class AppModel: ObservableObject {
   @Published var transcript = "按住手柄麦克风键说话，识别结果会显示在这里。"
   @Published var autoInsert = true
   @Published var localeIdentifier = "zh-CN"
+  @Published var protectPlaybackAudio = true {
+    didSet {
+      UserDefaults.standard.set(protectPlaybackAudio, forKey: "protectPlaybackAudio")
+      if started, protectPlaybackAudio { enforcePlaybackProtection(announce: true) }
+    }
+  }
   @Published var pointerGain = 1.0 {
     didSet { UserDefaults.standard.set(pointerGain, forKey: "pointerGain") }
   }
@@ -44,9 +50,24 @@ final class AppModel: ObservableObject {
   @Published var stickMaximumBoost = 2.2 {
     didSet { UserDefaults.standard.set(stickMaximumBoost, forKey: "stickMaximumBoost") }
   }
+  @Published var brakeMinimumSpeed = 0.28 {
+    didSet { UserDefaults.standard.set(brakeMinimumSpeed, forKey: "brakeMinimumSpeed") }
+  }
+  @Published var acceleratorMaximumSpeed = 2.6 {
+    didSet {
+      UserDefaults.standard.set(acceleratorMaximumSpeed, forKey: "acceleratorMaximumSpeed")
+    }
+  }
+  @Published var leftTriggerValue = 0.0
+  @Published var rightTriggerValue = 0.0
   @Published var mapping = ControllerMapping.standard {
     didSet {
       if mapping != oldValue { mappingDidChange() }
+    }
+  }
+  @Published var shortcutSettings = ControllerShortcutSettings.standard {
+    didSet {
+      if shortcutSettings != oldValue { shortcutSettingsDidChange() }
     }
   }
   @Published var latestInput = "等待手柄连接"
@@ -58,6 +79,7 @@ final class AppModel: ObservableObject {
   private let voice = VoiceService()
   private var timer: Timer?
   private var terminationObserver: NSObjectProtocol?
+  private var workspaceActivationObserver: NSObjectProtocol?
   private var started = false
   private var lastTick = ProcessInfo.processInfo.systemUptime
   private var nextPermissionRefresh = 0.0
@@ -76,6 +98,11 @@ final class AppModel: ObservableObject {
   private var rightMouseSources = Set<Int32>()
   private var pushToTalkSources = Set<Int32>()
   private var audioSelectionInitialized = false
+  private var focusHistory = ExternalFocusHistory()
+  private var voiceTestFinishing = false
+  private var suppressAutoInsertForCurrentVoice = false
+  private var voiceTestGeneration = VoiceTestSessionGeneration()
+  private var activeVoiceTestToken: UInt64?
 
   init() {
     let defaults = UserDefaults.standard
@@ -94,15 +121,33 @@ final class AppModel: ObservableObject {
     if let value = defaults.object(forKey: "stickMaximumBoost") as? Double {
       stickMaximumBoost = min(max(value, 1), 3)
     }
+    if let value = defaults.object(forKey: "brakeMinimumSpeed") as? Double {
+      brakeMinimumSpeed = min(max(value, 0.1), 1)
+    }
+    if let value = defaults.object(forKey: "acceleratorMaximumSpeed") as? Double {
+      acceleratorMaximumSpeed = min(max(value, 1), 4)
+    }
+    if defaults.object(forKey: "protectPlaybackAudio") != nil {
+      protectPlaybackAudio = defaults.bool(forKey: "protectPlaybackAudio")
+    }
     if let data = defaults.data(forKey: "controllerMapping"),
       let decoded = try? JSONDecoder().decode(ControllerMapping.self, from: data)
     {
       mapping = decoded
     }
+    if let data = defaults.data(forKey: "controllerShortcutSettings"),
+      let decoded = try? JSONDecoder().decode(ControllerShortcutSettings.self, from: data)
+    {
+      shortcutSettings = decoded
+    }
   }
 
   var selectedAudioDeviceName: String {
     audioDevices.first(where: { $0.id == selectedAudioDeviceID })?.name ?? "未选择麦克风"
+  }
+
+  var selectedAudioDevice: AudioInputDevice? {
+    audioDevices.first(where: { $0.id == selectedAudioDeviceID })
   }
 
   var canEnable: Bool {
@@ -111,6 +156,15 @@ final class AppModel: ObservableObject {
 
   var voicePermissionsGranted: Bool {
     microphoneAuthorization == .authorized && speechAuthorization == .authorized
+  }
+
+  var currentRacingSpeedMultiplier: Double {
+    ControlMath.racingSpeedMultiplier(
+      brake: leftTriggerValue,
+      accelerator: rightTriggerValue,
+      minimumSpeed: brakeMinimumSpeed,
+      maximumSpeed: acceleratorMaximumSpeed
+    )
   }
 
   var microphonePermissionLabel: String {
@@ -158,6 +212,23 @@ final class AppModel: ObservableObject {
     ) { [weak self] _ in
       MainActor.assumeIsolated {
         self?.shutdown()
+      }
+    }
+
+    if let application = NSWorkspace.shared.frontmostApplication {
+      recordApplicationActivation(application)
+    }
+    workspaceActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.didActivateApplicationNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] notification in
+      MainActor.assumeIsolated {
+        guard
+          let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+            as? NSRunningApplication
+        else { return }
+        self?.recordApplicationActivation(application)
       }
     }
   }
@@ -215,6 +286,8 @@ final class AppModel: ObservableObject {
   }
 
   func beginVoiceTest() {
+    activeVoiceTestToken = voiceTestGeneration.begin()
+    voiceTestFinishing = false
     updatePushToTalkSource(
       Self.interfaceVoiceSource,
       pressed: true,
@@ -224,15 +297,34 @@ final class AppModel: ObservableObject {
   }
 
   func endVoiceTest() {
-    updatePushToTalkSource(
-      Self.interfaceVoiceSource,
-      pressed: false,
-      commitOnRelease: true,
-      label: "界面测试"
+    guard pushToTalkSources.contains(Self.interfaceVoiceSource),
+      let token = activeVoiceTestToken, voiceTestGeneration.accepts(token)
+    else { return }
+    guard let target = restoreExternalFocusForVoiceTest() else {
+      invalidateVoiceTestSession()
+      suppressAutoInsertForCurrentVoice = true
+      updatePushToTalkSource(
+        Self.interfaceVoiceSource,
+        pressed: false,
+        commitOnRelease: true,
+        label: "界面测试"
+      )
+      setStatus("未找到可恢复的外部文本焦点；识别结果只会保留在 Helm 中。", log: true)
+      return
+    }
+    voiceTestFinishing = true
+    finishVoiceTestAfterFocusRestoration(
+      target: target,
+      token: token,
+      attemptsRemaining: 12
     )
   }
 
   func cancelVoiceTest() {
+    guard !voiceTestFinishing,
+      pushToTalkSources.contains(Self.interfaceVoiceSource)
+    else { return }
+    invalidateVoiceTestSession()
     updatePushToTalkSource(
       Self.interfaceVoiceSource,
       pressed: false,
@@ -247,7 +339,8 @@ final class AppModel: ObservableObject {
 
   func restoreDefaultMappings() {
     mapping = .standard
-    setStatus("已恢复默认按键映射。", log: true)
+    shortcutSettings = .standard
+    setStatus("已恢复默认按键映射与快捷键。", log: true)
   }
 
   func openAccessibilitySettings() {
@@ -266,6 +359,10 @@ final class AppModel: ObservableObject {
     if let terminationObserver {
       NotificationCenter.default.removeObserver(terminationObserver)
       self.terminationObserver = nil
+    }
+    if let workspaceActivationObserver {
+      NSWorkspace.shared.notificationCenter.removeObserver(workspaceActivationObserver)
+      self.workspaceActivationObserver = nil
     }
   }
 
@@ -334,7 +431,7 @@ final class AppModel: ObservableObject {
         x: leftStickX,
         y: leftStickY,
         deadZone: ControlMath.stickDeadZone,
-        gain: pointerGain,
+        gain: pointerGain * currentRacingSpeedMultiplier,
         maximumSpeed: ControlMath.stickPointerMaximumSpeed,
         holdDuration: holdDuration,
         accelerationDuration: stickAccelerationDuration,
@@ -353,7 +450,7 @@ final class AppModel: ObservableObject {
       let scroll = ControlMath.scrollDelta(
         axis: rightYAxis,
         deadZone: 0.18,
-        gain: scrollGain,
+        gain: scrollGain * currentRacingSpeedMultiplier,
         deltaTime: min(elapsed, ControlMath.maximumTimerGap),
         remainder: &scrollRemainder
       )
@@ -411,6 +508,16 @@ final class AppModel: ObservableObject {
       } else {
         latestInput = "左摇杆居中"
       }
+
+    case Int32(HELM_SDL_EVENT_TRIGGERS):
+      leftTriggerValue = min(max(Double(event.x), 0), 1)
+      rightTriggerValue = min(max(Double(event.y), 0), 1)
+      latestInput = String(
+        format: "L2 刹车 %.0f%% · R2 加速 %.0f%% · %.2f×",
+        leftTriggerValue * 100,
+        rightTriggerValue * 100,
+        currentRacingSpeedMultiplier
+      )
 
     case Int32(HELM_SDL_EVENT_TOUCH_DOWN):
       if event.finger == 0 {
@@ -518,6 +625,24 @@ final class AppModel: ObservableObject {
         commitOnRelease: true,
         label: label
       )
+    case .shortcut1:
+      if pressed { performShortcut(shortcutSettings.slot1, source: label) }
+    case .shortcut2:
+      if pressed { performShortcut(shortcutSettings.slot2, source: label) }
+    case .shortcut3:
+      if pressed { performShortcut(shortcutSettings.slot3, source: label) }
+    }
+  }
+
+  private func performShortcut(_ shortcut: KeyboardShortcutDefinition, source: String) {
+    guard accessibilityGranted else {
+      setStatus("快捷键需要辅助功能权限。", log: true)
+      return
+    }
+    if InputInjector.sendShortcut(shortcut) {
+      setStatus("已发送快捷键 \(shortcut.label)（\(source)）。", log: true)
+    } else {
+      setStatus("快捷键被安全输入阻止或发送失败。", log: true)
     }
   }
 
@@ -558,7 +683,7 @@ final class AppModel: ObservableObject {
       to: current,
       elapsed: now - previousTime,
       surfaceSize: CGSize(width: 1_920, height: 1_070),
-      gain: pointerGain * 0.65,
+      gain: pointerGain * 0.65 * currentRacingSpeedMultiplier,
       acceleration: 0.18,
       maximum: 90
     )
@@ -579,12 +704,17 @@ final class AppModel: ObservableObject {
       return
     }
     guard selectedAudioDeviceID != 0,
-      audioDevices.contains(where: { $0.id == selectedAudioDeviceID })
+      let selectedDevice = selectedAudioDevice
     else {
       setStatus("请选择一个当前可用的麦克风。", log: true)
       return
     }
+    guard !protectPlaybackAudio || !selectedDevice.mayInterruptPlayback else {
+      setStatus("已阻止蓝牙麦克风：它会切换通话链路并打断音乐，请选内置或 USB 麦克风。", log: true)
+      return
+    }
 
+    suppressAutoInsertForCurrentVoice = false
     do {
       let sampleRate = try voice.start(
         deviceID: selectedAudioDeviceID,
@@ -612,18 +742,24 @@ final class AppModel: ObservableObject {
   private func endVoice(commit: Bool, source: String) {
     guard isListening else { return }
     isListening = false
-    voice.stop(commit: commit)
     setStatus(commit ? "PTT 已释放，正在完成识别…" : "PTT 已停止（\(source)）", log: true)
+    voice.stop(commit: commit)
   }
 
   private func voiceCompleted(text: String?, error: String?) {
     isListening = false
+    let insertionSuppressed = suppressAutoInsertForCurrentVoice
+    suppressAutoInsertForCurrentVoice = false
     if let text, !text.isEmpty {
       transcript = text
-      if autoInsert {
+      if insertionSuppressed {
+        setStatus("未能确认外部文本焦点；识别文本只保留在 Helm 中。", log: true)
+      } else if autoInsert {
         switch InputInjector.insertAtFocusedTextElement(text) {
-        case .inserted:
-          setStatus("识别文本已写入当前文本框。", log: true)
+        case .inserted(let method):
+          setStatus("识别文本已写入当前文本框（\(method)）。", log: true)
+        case .dispatched(let method):
+          setStatus("已向当前焦点发送\(method)；目标应用可能拒绝，请确认文本是否出现。", log: true)
         case .refused(let reason):
           setStatus("\(reason)；文本保留在 Helm 中。", log: true)
         }
@@ -651,6 +787,8 @@ final class AppModel: ObservableObject {
     pushToTalkSources.removeAll()
     voice.cancelCurrent()
     isListening = false
+    invalidateVoiceTestSession()
+    suppressAutoInsertForCurrentVoice = false
     controlsEnabled = false
     optionsPressedAt = nil
     resetMotionState()
@@ -662,6 +800,8 @@ final class AppModel: ObservableObject {
     leftStickY = 0
     leftStickActiveSince = nil
     rightYAxis = 0
+    leftTriggerValue = 0
+    rightTriggerValue = 0
     scrollRemainder = 0
     lastTouch = nil
     lastTouchTime = nil
@@ -678,6 +818,13 @@ final class AppModel: ObservableObject {
     }
   }
 
+  private func shortcutSettingsDidChange() {
+    if let data = try? JSONEncoder().encode(shortcutSettings) {
+      UserDefaults.standard.set(data, forKey: "controllerShortcutSettings")
+    }
+    if started { setStatus("外部快捷键已保存。", log: true) }
+  }
+
   private func refreshPermissionState() {
     let access = InputInjector.accessibilityTrusted()
     let microphone = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -689,8 +836,11 @@ final class AppModel: ObservableObject {
     if controlsEnabled, !access {
       emergencyStop(reason: "辅助功能权限已失效")
     } else if isListening, microphone != .authorized || speech != .authorized {
-      voice.stop(commit: false)
+      voice.cancelCurrent()
       isListening = false
+      pushToTalkSources.removeAll()
+      invalidateVoiceTestSession()
+      suppressAutoInsertForCurrentVoice = false
       setStatus("语音权限已失效，PTT 已安全停止。", log: true)
     }
   }
@@ -701,16 +851,122 @@ final class AppModel: ObservableObject {
     audioDevices = refreshed
     if !audioSelectionInitialized {
       audioSelectionInitialized = true
-      selectedAudioDeviceID = refreshed.first(where: { $0.isDefault })?.id ?? 0
+      selectedAudioDeviceID =
+        AudioInputCatalog.preferredInput(
+          from: refreshed,
+          protectPlayback: protectPlaybackAudio
+        )?.id ?? 0
     } else if previousSelection != 0,
       !refreshed.contains(where: { $0.id == previousSelection })
     {
       if isListening {
-        voice.stop(commit: false)
+        voice.cancelCurrent()
         isListening = false
+        pushToTalkSources.removeAll()
+        invalidateVoiceTestSession()
+        suppressAutoInsertForCurrentVoice = false
         setStatus("选择的麦克风已拔出，PTT 已停止；未自动切换。", log: true)
       }
       selectedAudioDeviceID = 0
+    }
+    if protectPlaybackAudio { enforcePlaybackProtection(announce: false) }
+  }
+
+  private func enforcePlaybackProtection(announce: Bool) {
+    guard protectPlaybackAudio, let selectedAudioDevice, selectedAudioDevice.mayInterruptPlayback
+    else { return }
+    guard
+      let plan = AudioInputCatalog.playbackProtectionPlan(
+        selected: selectedAudioDevice,
+        from: audioDevices,
+        captureActive: isListening
+      )
+    else { return }
+    if plan.shouldStopCapture {
+      voice.cancelCurrent()
+      isListening = false
+      pushToTalkSources.removeAll()
+      invalidateVoiceTestSession()
+      suppressAutoInsertForCurrentVoice = false
+    }
+    selectedAudioDeviceID = plan.replacement?.id ?? 0
+    guard announce else { return }
+    if let replacement = plan.replacement {
+      let prefix = plan.shouldStopCapture ? "已立即停止蓝牙采集，并" : "已"
+      setStatus("\(prefix)切换到 \(replacement.name)，避免启用蓝牙通话链路。", log: true)
+    } else if plan.shouldStopCapture {
+      setStatus("已立即停止蓝牙采集；没有安全麦克风，请连接 USB 麦克风。", log: true)
+    } else {
+      setStatus("没有安全麦克风；请连接 USB 麦克风或关闭播放保护。", log: true)
+    }
+  }
+
+  private func finishVoiceTestAfterFocusRestoration(
+    target: Int32,
+    token: UInt64,
+    attemptsRemaining: Int
+  ) {
+    guard voiceTestFinishing,
+      activeVoiceTestToken == token,
+      voiceTestGeneration.accepts(token),
+      pushToTalkSources.contains(Self.interfaceVoiceSource)
+    else { return }
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier == target {
+      invalidateVoiceTestSession()
+      updatePushToTalkSource(
+        Self.interfaceVoiceSource,
+        pressed: false,
+        commitOnRelease: true,
+        label: "界面测试"
+      )
+      return
+    }
+    guard attemptsRemaining > 0 else {
+      invalidateVoiceTestSession()
+      suppressAutoInsertForCurrentVoice = true
+      updatePushToTalkSource(
+        Self.interfaceVoiceSource,
+        pressed: false,
+        commitOnRelease: true,
+        label: "界面测试"
+      )
+      setStatus("外部应用未在 0.5 秒内恢复焦点；识别结果只会保留在 Helm 中。", log: true)
+      return
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+      self?.finishVoiceTestAfterFocusRestoration(
+        target: target,
+        token: token,
+        attemptsRemaining: attemptsRemaining - 1
+      )
+    }
+  }
+
+  private func invalidateVoiceTestSession() {
+    voiceTestGeneration.invalidate()
+    activeVoiceTestToken = nil
+    voiceTestFinishing = false
+  }
+
+  private func externalWindowOwnerProcessIdentifiers() -> [Int32] {
+    let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+    guard
+      let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+        as? [[String: Any]]
+    else { return [] }
+    let helmIdentifier = ProcessInfo.processInfo.processIdentifier
+    return windows.compactMap { window in
+      guard
+        let layer = window[kCGWindowLayer as String] as? NSNumber,
+        layer.intValue == 0,
+        let owner = window[kCGWindowOwnerPID as String] as? NSNumber
+      else { return nil }
+      let identifier = owner.int32Value
+      guard identifier > 0, identifier != helmIdentifier,
+        let application = NSRunningApplication(processIdentifier: identifier),
+        application.activationPolicy == .regular, !application.isTerminated
+      else { return nil }
+      return identifier
     }
   }
 
@@ -724,6 +980,29 @@ final class AppModel: ObservableObject {
     formatter.dateFormat = "HH:mm:ss"
     activity.insert("\(formatter.string(from: Date()))  \(message)", at: 0)
     if activity.count > 12 { activity.removeLast(activity.count - 12) }
+  }
+
+  private func recordApplicationActivation(_ application: NSRunningApplication) {
+    focusHistory.recordActivation(
+      processIdentifier: application.processIdentifier,
+      helmProcessIdentifier: ProcessInfo.processInfo.processIdentifier
+    )
+  }
+
+  private func restoreExternalFocusForVoiceTest() -> Int32? {
+    let current = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+    let targets = focusHistory.restorationTargets(
+      currentProcessIdentifier: current,
+      helmProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+      fallbackProcessIdentifiers: externalWindowOwnerProcessIdentifiers()
+    )
+    for target in targets {
+      guard let application = NSRunningApplication(processIdentifier: target),
+        !application.isTerminated
+      else { continue }
+      if application.activate(options: [.activateAllWindows]) { return target }
+    }
+    return nil
   }
 
   private func connectionName(_ state: Int32) -> String {

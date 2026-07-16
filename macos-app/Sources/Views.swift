@@ -64,7 +64,7 @@ struct ControlCenterView: View {
           .foregroundStyle(.secondary)
       }
       Spacer()
-      Text("DEMO 0.4")
+      Text("DEMO 0.5")
         .font(.caption.weight(.bold))
         .foregroundStyle(helmAccent)
         .padding(.horizontal, 10)
@@ -163,6 +163,7 @@ struct ControlCenterView: View {
         MappingRow(source: "左摇杆", target: "主光标", icon: "cursorarrow.motionlines")
         MappingRow(source: "触控板", target: "精细光标", icon: "cursorarrow")
         MappingRow(source: "右摇杆", target: "滚动", icon: "scroll")
+        MappingRow(source: "L2 / R2", target: "刹车 / 加速", icon: "gauge.with.dots.needle.50percent")
         MappingRow(source: "Options + 触控板", target: "急停", icon: "stop.fill")
       }
     }
@@ -190,6 +191,24 @@ struct ControlCenterView: View {
         ActionMappingPicker(label: "D-pad 上", selection: $model.mapping.dpadUp)
         ActionMappingPicker(label: "D-pad 下", selection: $model.mapping.dpadDown)
         ActionMappingPicker(label: "麦克风键", selection: $model.mapping.microphone)
+      }
+
+      Divider().opacity(0.35)
+
+      VStack(alignment: .leading, spacing: 10) {
+        HStack {
+          Label("外部输入法快捷键", systemImage: "keyboard")
+            .font(.subheadline.weight(.semibold))
+          Spacer()
+          Text("把任意手柄键映射到快捷键 1–3")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+        }
+        HStack(alignment: .top, spacing: 12) {
+          ShortcutSlotEditor(title: "快捷键 1", shortcut: $model.shortcutSettings.slot1)
+          ShortcutSlotEditor(title: "快捷键 2", shortcut: $model.shortcutSettings.slot2)
+          ShortcutSlotEditor(title: "快捷键 3", shortcut: $model.shortcutSettings.slot3)
+        }
       }
 
       Divider().opacity(0.35)
@@ -222,6 +241,37 @@ struct ControlCenterView: View {
           .frame(height: 70)
         }
         .frame(maxWidth: .infinity)
+      }
+
+      Divider().opacity(0.35)
+
+      VStack(alignment: .leading, spacing: 10) {
+        HStack {
+          Label("赛车式扳机调速", systemImage: "gauge.with.dots.needle.67percent")
+            .font(.subheadline.weight(.semibold))
+          Spacer()
+          Text(String(format: "当前 %.2f×", model.currentRacingSpeedMultiplier))
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(helmAccent)
+        }
+        HStack(spacing: 22) {
+          LabeledSlider(
+            label: "L2 全刹最低速度",
+            value: $model.brakeMinimumSpeed,
+            range: 0.1...1,
+            display: String(format: "%.2f×", model.brakeMinimumSpeed)
+          )
+          LabeledSlider(
+            label: "R2 全油最高速度",
+            value: $model.acceleratorMaximumSpeed,
+            range: 1...4,
+            display: String(format: "%.1f×", model.acceleratorMaximumSpeed)
+          )
+        }
+        HStack(spacing: 18) {
+          TriggerMeter(label: "L2 刹车", value: model.leftTriggerValue, color: .orange)
+          TriggerMeter(label: "R2 加速", value: model.rightTriggerValue, color: helmAccent)
+        }
       }
 
       Text("Options + 触控板为固定安全急停手势，不允许重映射。修改映射时会自动停用控制。")
@@ -285,8 +335,13 @@ struct ControlCenterView: View {
             Text(model.audioDevices.isEmpty ? "未发现输入设备" : "请选择麦克风")
               .tag(AudioDeviceID(0))
             ForEach(model.audioDevices) { device in
-              Text(device.isDefault ? "\(device.name) · 系统默认" : device.name)
-                .tag(device.id)
+              Text(
+                device.isDefault
+                  ? "\(device.name) · \(device.transport.label) · 系统默认"
+                  : "\(device.name) · \(device.transport.label)"
+              )
+              .tag(device.id)
+              .disabled(model.protectPlaybackAudio && device.mayInterruptPlayback)
             }
           }
           .labelsHidden()
@@ -310,6 +365,26 @@ struct ControlCenterView: View {
         HoldToTalkButton()
           .environmentObject(model)
       }
+
+      HStack {
+        Toggle("保护音乐播放（自动避开蓝牙麦克风）", isOn: $model.protectPlaybackAudio)
+          .toggleStyle(.switch)
+          .controlSize(.small)
+        Spacer()
+        if let selectedDevice = model.selectedAudioDevice {
+          if selectedDevice.mayInterruptPlayback {
+            Label("蓝牙麦克风会切换通话链路", systemImage: "exclamationmark.triangle.fill")
+              .foregroundStyle(.orange)
+          } else {
+            Label("当前麦克风不会启用蓝牙通话链路", systemImage: "speaker.wave.2.fill")
+              .foregroundStyle(helmAccent)
+          }
+        } else {
+          Label("尚未选择麦克风", systemImage: "mic.slash")
+            .foregroundStyle(.secondary)
+        }
+      }
+      .font(.caption)
 
       VStack(alignment: .leading, spacing: 6) {
         HStack {
@@ -518,6 +593,64 @@ private struct ActionMappingPicker: View {
     .padding(.horizontal, 10)
     .padding(.vertical, 6)
     .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+  }
+}
+
+private struct ShortcutSlotEditor: View {
+  let title: String
+  @Binding var shortcut: KeyboardShortcutDefinition
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack {
+        Text(title)
+          .font(.caption.weight(.semibold))
+        Spacer()
+        Text(shortcut.label)
+          .font(.caption.monospaced())
+          .foregroundStyle(helmAccent)
+      }
+      Picker("按键", selection: $shortcut.key) {
+        ForEach(ShortcutKey.allCases) { key in
+          Text(key.title).tag(key)
+        }
+      }
+      .labelsHidden()
+
+      HStack(spacing: 5) {
+        Toggle("⌃", isOn: $shortcut.control)
+        Toggle("⌥", isOn: $shortcut.option)
+        Toggle("⇧", isOn: $shortcut.shift)
+        Toggle("⌘", isOn: $shortcut.command)
+      }
+      .toggleStyle(.button)
+      .buttonStyle(.bordered)
+      .controlSize(.mini)
+    }
+    .padding(10)
+    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+    .frame(maxWidth: .infinity)
+  }
+}
+
+private struct TriggerMeter: View {
+  let label: String
+  let value: Double
+  let color: Color
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      HStack {
+        Text(label)
+        Spacer()
+        Text("\(Int(value * 100))%")
+          .monospacedDigit()
+      }
+      .font(.caption)
+      ProgressView(value: value)
+        .tint(color)
+    }
+    .frame(maxWidth: .infinity)
   }
 }
 

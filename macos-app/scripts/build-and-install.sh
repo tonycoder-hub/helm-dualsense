@@ -31,6 +31,8 @@ xcrun swiftc \
     "$source_dir/ControlMath.swift" \
     "$source_dir/ControllerMapping.swift" \
     "$source_dir/AudioInputCatalog.swift" \
+    "$source_dir/TextInsertionPolicy.swift" \
+    "$source_dir/ExternalFocusHistory.swift" \
     "$app_root/Tests/main.swift" \
     -framework AVFoundation \
     -framework CoreAudio \

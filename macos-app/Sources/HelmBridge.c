@@ -9,8 +9,11 @@ static SDL_Gamepad *active_gamepad = NULL;
 static bool initialized = false;
 static bool pending_connected = false;
 static bool pending_left_stick = false;
+static bool pending_triggers = false;
 static float left_stick_x = 0.0f;
 static float left_stick_y = 0.0f;
+static float left_trigger = 0.0f;
+static float right_trigger = 0.0f;
 
 static void clear_event(HelmSDLEvent *event) {
     memset(event, 0, sizeof(*event));
@@ -38,10 +41,20 @@ static float normalized_axis(Sint16 value) {
     return value < 0 ? (float)value / 32768.0f : (float)value / 32767.0f;
 }
 
+static float normalized_trigger(Sint16 value) {
+    return value <= 0 ? 0.0f : (float)value / 32767.0f;
+}
+
 static void reset_left_stick(void) {
     left_stick_x = 0.0f;
     left_stick_y = 0.0f;
     pending_left_stick = false;
+}
+
+static void reset_triggers(void) {
+    left_trigger = 0.0f;
+    right_trigger = 0.0f;
+    pending_triggers = false;
 }
 
 static bool open_gamepad(SDL_JoystickID instance_id) {
@@ -59,7 +72,12 @@ static bool open_gamepad(SDL_JoystickID instance_id) {
         SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTX));
     left_stick_y = normalized_axis(
         SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTY));
+    left_trigger = normalized_trigger(
+        SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
+    right_trigger = normalized_trigger(
+        SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
     pending_left_stick = true;
+    pending_triggers = true;
     pending_connected = true;
     return true;
 }
@@ -142,6 +160,14 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
         return true;
     }
 
+    if (pending_triggers && active_gamepad != NULL) {
+        pending_triggers = false;
+        output->kind = HELM_SDL_EVENT_TRIGGERS;
+        output->x = left_trigger;
+        output->y = right_trigger;
+        return true;
+    }
+
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
@@ -164,6 +190,7 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
                     SDL_CloseGamepad(active_gamepad);
                     active_gamepad = NULL;
                     reset_left_stick();
+                    reset_triggers();
                     output->kind = HELM_SDL_EVENT_DISCONNECTED;
                     return true;
                 }
@@ -202,6 +229,19 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
                         output->value = normalized_axis(event.gaxis.value);
                         return true;
                     }
+                    if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
+                        event.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
+                        float value = normalized_trigger(event.gaxis.value);
+                        if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER) {
+                            left_trigger = value;
+                        } else {
+                            right_trigger = value;
+                        }
+                        output->kind = HELM_SDL_EVENT_TRIGGERS;
+                        output->x = left_trigger;
+                        output->y = right_trigger;
+                        return true;
+                    }
                 }
                 break;
 
@@ -236,6 +276,7 @@ void HelmSDLStop(void) {
     }
     pending_connected = false;
     reset_left_stick();
+    reset_triggers();
     if (initialized) {
         SDL_QuitSubSystem(SDL_INIT_GAMEPAD | SDL_INIT_EVENTS);
         initialized = false;
