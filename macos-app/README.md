@@ -28,6 +28,12 @@ external input methods. It also exposes the input polling rate, a smooth
 hold-to-accelerate curve, and racing-style L2/R2 speed multipliers. These
 settings persist locally.
 
+Semantic haptics are optional and off by default. When enabled, short tuned
+pulses acknowledge clicks, navigation, shortcuts, and PTT state changes; normal
+pointer movement and scrolling remain silent. Use **Test Haptics** after SDL
+reports rumble capability, then tune the master intensity. USB and Bluetooth
+feel still require separate real-controller validation.
+
 The **Hold to Test** control lets you test microphone selection and speech
 recognition without a controller, then returns to the last external foreground
 application before committing text. If that focus cannot be restored and
@@ -50,13 +56,67 @@ before changing the selected input.
 ## Build locally
 
 The checked-out official SDL framework must be present at
-`macos-app/.vendor/SDL3.framework`. Then run:
+`macos-app/.vendor/SDL3.framework`, and the verified Sparkle 2.9.4 framework at
+`macos-app/.vendor/Sparkle.framework`. See `ThirdParty/README.md` for the pinned
+URLs and checksums. Then run:
 
 ```bash
 macos-app/scripts/build-and-install.sh --launch
 ```
 
 The script runs the pure mapping tests, builds with the installed Command Line
-Tools, embeds SDL3, applies an ad-hoc signature, verifies the bundle, preserves
-the previous installation only while replacement is in progress, and keeps one
+Tools, embeds SDL3 and inactive pinned Sparkle, applies an ad-hoc signature,
+verifies the bundle, preserves the previous installation only while replacement
+is in progress, and keeps one
 installed copy in `~/Applications`.
+
+This development installer cannot create a public release. The separate
+fail-closed readiness check is:
+
+```bash
+HELM_SDL_ARCHIVE=/tmp/SDL3-3.4.12.dmg \
+HELM_SPARKLE_ARCHIVE=/tmp/Sparkle-2.9.4.tar.xz \
+  macos-app/scripts/release-preflight.sh
+```
+
+Developer ID signing, notarization, and signed Sparkle updates remain blocked
+until every reported gate passes.
+
+Formal preflight and final verification also require
+`HELM_RELEASE_SOURCE_COMMIT` to be the full hash of the same reviewed, clean
+`HEAD`. The history anchor is read from that Git commit, not trusted from a
+mutable working-tree value.
+
+Both dependency inputs are snapshotted before use. SDL is bound to the tracked
+version and DMG SHA-256, then its macOS framework is compared after signature
+normalization during preflight and final artifact verification. The final
+Mach-O inventory covers the entire `Helm.app/Contents` tree and allows only the
+main executable plus the six expected SDL/Sparkle objects.
+Signature-normalized framework comparison also binds path, type, mode, symlink
+target, and file hashes, while rejecting unexpected signature payloads, ACLs,
+file flags, hard links, and non-platform xattrs.
+
+Formal feed and enclosure URLs must also pass the canonical HTTPS profile:
+printable ASCII, a lowercase validated DNS name or canonical IP literal, no
+credentials or fragment, and no whitespace, forbidden raw delimiters, or
+malformed percent escape. The release scripts report these as explicit gates.
+
+The Demo intentionally omits `SUFeedURL` and `SUPublicEDKey`. Its visible update
+status therefore remains disabled and it never contacts a placeholder feed.
+After a formal artifact is produced, verify it with the ZIP, current signed
+appcast, and the exact prior signed appcast archived with the preceding
+immutable release:
+
+```bash
+macos-app/scripts/verify-release-artifact.sh \
+  /path/to/Helm.app \
+  /path/to/Helm-version-macOS-arm64.zip \
+  /path/to/appcast.xml \
+  /path/to/previous-signed-appcast.xml
+```
+
+For the first formal release, the last argument is the reviewed, offline,
+EdDSA-signed genesis appcast whose only build is `0`. A raw previous-build
+number is intentionally unsupported. Its exact SHA-256 must already be pinned
+in `Release/PreviousAppcast.sha256`; the committed `UNCONFIGURED` sentinel keeps
+formal release checks blocked until that reviewed key-ceremony step is complete.

@@ -7,6 +7,7 @@ app_root=$(cd "$script_dir/.." && pwd)
 source_dir="$app_root/Sources"
 build_dir="$app_root/.build"
 vendor_framework=${HELM_SDL3_FRAMEWORK:-"$app_root/.vendor/SDL3.framework"}
+sparkle_framework=${HELM_SPARKLE_FRAMEWORK:-"$app_root/.vendor/Sparkle.framework"}
 bundle_name="Helm Demo.app"
 staged_app="$build_dir/$bundle_name"
 install_root="$HOME/Applications"
@@ -16,6 +17,10 @@ architecture=$(uname -m)
 
 if [[ ! -f "$vendor_framework/SDL3" ]]; then
     echo "Missing SDL3.framework at: $vendor_framework" >&2
+    exit 2
+fi
+if [[ ! -f "$sparkle_framework/Sparkle" ]]; then
+    echo "Missing Sparkle.framework at: $sparkle_framework" >&2
     exit 2
 fi
 
@@ -33,6 +38,7 @@ xcrun swiftc \
     "$source_dir/AudioInputCatalog.swift" \
     "$source_dir/TextInsertionPolicy.swift" \
     "$source_dir/ExternalFocusHistory.swift" \
+    "$source_dir/HapticFeedback.swift" \
     "$app_root/Tests/main.swift" \
     -framework AVFoundation \
     -framework CoreAudio \
@@ -63,6 +69,7 @@ xcrun swiftc \
     "$build_dir/HelmBridge.o" \
     -F "$(dirname "$vendor_framework")" \
     -framework SDL3 \
+    -framework Sparkle \
     -framework AppKit \
     -framework ApplicationServices \
     -framework AVFoundation \
@@ -75,13 +82,20 @@ xcrun swiftc \
     -o "$staged_app/Contents/MacOS/HelmDemo"
 
 ditto "$vendor_framework" "$staged_app/Contents/Frameworks/SDL3.framework"
+ditto "$sparkle_framework" "$staged_app/Contents/Frameworks/Sparkle.framework"
 ditto "$app_root/Resources/Info.plist" "$staged_app/Contents/Info.plist"
 if [[ -f "$vendor_framework/Resources/LICENSE.txt" ]]; then
     ditto "$vendor_framework/Resources/LICENSE.txt" "$staged_app/Contents/Resources/SDL3-LICENSE.txt"
 fi
+if [[ -f "$app_root/.vendor/Sparkle-LICENSE.txt" ]]; then
+    ditto "$app_root/.vendor/Sparkle-LICENSE.txt" \
+        "$staged_app/Contents/Resources/Sparkle-LICENSE.txt"
+fi
 
 plutil -lint "$staged_app/Contents/Info.plist"
 codesign --force --sign - --timestamp=none "$staged_app/Contents/Frameworks/SDL3.framework"
+codesign --force --deep --sign - --timestamp=none \
+    "$staged_app/Contents/Frameworks/Sparkle.framework"
 codesign --force --deep --sign - --timestamp=none --identifier io.github.tonycoder-hub.helm "$staged_app"
 codesign --verify --deep --strict --verbose=2 "$staged_app"
 

@@ -58,6 +58,16 @@ final class AppModel: ObservableObject {
       UserDefaults.standard.set(acceleratorMaximumSpeed, forKey: "acceleratorMaximumSpeed")
     }
   }
+  @Published var hapticsEnabled = HapticFeedbackPolicy.defaultEnabled {
+    didSet {
+      UserDefaults.standard.set(hapticsEnabled, forKey: "hapticsEnabled")
+      if started, !hapticsEnabled { hapticCoordinator.stop(backend: hapticBackend) }
+    }
+  }
+  @Published var hapticIntensity = HapticFeedbackPolicy.defaultIntensity {
+    didSet { UserDefaults.standard.set(hapticIntensity, forKey: "hapticIntensity") }
+  }
+  @Published var hapticsAvailable = false
   @Published var leftTriggerValue = 0.0
   @Published var rightTriggerValue = 0.0
   @Published var mapping = ControllerMapping.standard {
@@ -77,6 +87,7 @@ final class AppModel: ObservableObject {
   @Published var selectedAudioDeviceID = AudioDeviceID(0)
 
   private let voice = VoiceService()
+  private let updateController = HelmUpdateController()
   private var timer: Timer?
   private var terminationObserver: NSObjectProtocol?
   private var workspaceActivationObserver: NSObjectProtocol?
@@ -103,6 +114,8 @@ final class AppModel: ObservableObject {
   private var suppressAutoInsertForCurrentVoice = false
   private var voiceTestGeneration = VoiceTestSessionGeneration()
   private var activeVoiceTestToken: UInt64?
+  private let hapticBackend = SDLHapticBackend()
+  private var hapticCoordinator = HapticCoordinator(minimumInterval: 0.055)
 
   init() {
     let defaults = UserDefaults.standard
@@ -126,6 +139,12 @@ final class AppModel: ObservableObject {
     }
     if let value = defaults.object(forKey: "acceleratorMaximumSpeed") as? Double {
       acceleratorMaximumSpeed = min(max(value, 1), 4)
+    }
+    if defaults.object(forKey: "hapticsEnabled") != nil {
+      hapticsEnabled = defaults.bool(forKey: "hapticsEnabled")
+    }
+    if let value = defaults.object(forKey: "hapticIntensity") as? Double {
+      hapticIntensity = min(max(value, 0.2), 1)
     }
     if defaults.object(forKey: "protectPlaybackAudio") != nil {
       protectPlaybackAudio = defaults.bool(forKey: "protectPlaybackAudio")
@@ -165,6 +184,19 @@ final class AppModel: ObservableObject {
       minimumSpeed: brakeMinimumSpeed,
       maximumSpeed: acceleratorMaximumSpeed
     )
+  }
+
+  var hapticCapabilityLabel: String {
+    guard controllerConnected else { return "等待连接 DualSense" }
+    return hapticsAvailable ? "SDL 已报告整机震动能力" : "当前连接未报告震动能力"
+  }
+
+  var updateChannelLabel: String {
+    updateController.isConfigured ? "签名更新通道已配置" : "Demo 未配置正式更新通道"
+  }
+
+  var canCheckForUpdates: Bool {
+    updateController.isConfigured
   }
 
   var microphonePermissionLabel: String {
@@ -259,6 +291,7 @@ final class AppModel: ObservableObject {
     controlsEnabled = true
     resetMotionState()
     setStatus("控制已启用。Options + 触控板可随时紧急停止。", log: true)
+    playHaptic(.controlEnabled)
   }
 
   func requestAccessibility() {
@@ -335,6 +368,35 @@ final class AppModel: ObservableObject {
 
   func clearTranscript() {
     transcript = ""
+  }
+
+  func testHaptics() {
+    guard controllerConnected else {
+      setStatus("请先连接 DualSense，再测试震动。", log: true)
+      return
+    }
+    hapticsAvailable = hapticBackend.isAvailable()
+    guard hapticsEnabled else {
+      setStatus("请先开启操作震动。", log: true)
+      return
+    }
+    guard hapticsAvailable else {
+      setStatus("SDL 未报告当前连接支持整机震动；请稍后用 USB 与蓝牙分别验证。", log: true)
+      return
+    }
+    if playHaptic(.preview, allowsDisabledControls: true) {
+      setStatus("已发送一次 58ms 震动测试。", log: true)
+    } else {
+      setStatus("震动测试未发送；请稍后重试或重新连接手柄。", log: true)
+    }
+  }
+
+  func checkForUpdates() {
+    if updateController.checkForUpdates() {
+      setStatus("正在通过签名更新通道检查新版本。", log: true)
+    } else {
+      setStatus("当前 Demo 未配置正式更新通道；不会连接占位 feed。", log: true)
+    }
   }
 
   func restoreDefaultMappings() {
@@ -461,6 +523,7 @@ final class AppModel: ObservableObject {
       refreshPermissionState()
       microphoneButtonAvailable = controllerConnected && HelmSDLHasMicrophoneButton()
       touchpadCount = controllerConnected ? HelmSDLTouchpadCount() : 0
+      hapticsAvailable = controllerConnected && hapticBackend.isAvailable()
       nextPermissionRefresh = now + 1
     }
     if now >= nextAudioRefresh {
@@ -478,6 +541,7 @@ final class AppModel: ObservableObject {
       connectionLabel = connectionName(HelmSDLConnectionState())
       microphoneButtonAvailable = HelmSDLHasMicrophoneButton()
       touchpadCount = HelmSDLTouchpadCount()
+      hapticsAvailable = hapticBackend.isAvailable()
       emergencyStop(reason: "手柄已连接，等待显式启用", announce: false)
       latestInput = "已连接 \(controllerName)"
       setStatus("检测到 \(controllerName)，请检查权限后启用控制。", log: true)
@@ -489,6 +553,7 @@ final class AppModel: ObservableObject {
       connectionLabel = "—"
       microphoneButtonAvailable = false
       touchpadCount = 0
+      hapticsAvailable = false
       latestInput = "手柄已断开"
 
     case Int32(HELM_SDL_EVENT_BUTTON):
@@ -605,6 +670,7 @@ final class AppModel: ObservableObject {
       if nextState != leftMouseDown {
         leftMouseDown = nextState
         InputInjector.mouseButton(.left, pressed: nextState)
+        if nextState { playHaptic(.primaryAction) }
       }
     case .secondaryClick:
       guard accessibilityGranted else { return }
@@ -613,11 +679,18 @@ final class AppModel: ObservableObject {
       if nextState != rightMouseDown {
         rightMouseDown = nextState
         InputInjector.mouseButton(.right, pressed: nextState)
+        if nextState { playHaptic(.secondaryAction) }
       }
     case .pageUp:
-      if pressed, accessibilityGranted { InputInjector.page(direction: 1) }
+      if pressed, accessibilityGranted {
+        InputInjector.page(direction: 1)
+        playHaptic(.navigation)
+      }
     case .pageDown:
-      if pressed, accessibilityGranted { InputInjector.page(direction: -1) }
+      if pressed, accessibilityGranted {
+        InputInjector.page(direction: -1)
+        playHaptic(.navigation)
+      }
     case .pushToTalk:
       updatePushToTalkSource(
         source,
@@ -641,6 +714,7 @@ final class AppModel: ObservableObject {
     }
     if InputInjector.sendShortcut(shortcut) {
       setStatus("已发送快捷键 \(shortcut.label)（\(source)）。", log: true)
+      playHaptic(.shortcut)
     } else {
       setStatus("快捷键被安全输入阻止或发送失败。", log: true)
     }
@@ -733,6 +807,7 @@ final class AppModel: ObservableObject {
         "PTT 已开始（\(source) · \(selectedAudioDeviceName) · \(Int(sampleRate)) Hz）",
         log: true
       )
+      playHaptic(.voiceStart)
     } catch {
       isListening = false
       setStatus("无法开始语音输入：\(error.localizedDescription)", log: true)
@@ -743,6 +818,7 @@ final class AppModel: ObservableObject {
     guard isListening else { return }
     isListening = false
     setStatus(commit ? "PTT 已释放，正在完成识别…" : "PTT 已停止（\(source)）", log: true)
+    playHaptic(.voiceStop)
     voice.stop(commit: commit)
   }
 
@@ -786,6 +862,7 @@ final class AppModel: ObservableObject {
     rightMouseSources.removeAll()
     pushToTalkSources.removeAll()
     voice.cancelCurrent()
+    hapticCoordinator.stop(backend: hapticBackend)
     isListening = false
     invalidateVoiceTestSession()
     suppressAutoInsertForCurrentVoice = false
@@ -805,6 +882,28 @@ final class AppModel: ObservableObject {
     scrollRemainder = 0
     lastTouch = nil
     lastTouchTime = nil
+  }
+
+  @discardableResult
+  private func playHaptic(
+    _ kind: HapticFeedbackKind,
+    allowsDisabledControls: Bool = false
+  ) -> Bool {
+    let now = ProcessInfo.processInfo.systemUptime
+    let sent = hapticCoordinator.play(
+      kind,
+      intensity: hapticIntensity,
+      enabled: hapticsEnabled,
+      connected: controllerConnected,
+      controlsEnabled: controlsEnabled,
+      allowsDisabledControls: allowsDisabledControls,
+      now: now,
+      backend: hapticBackend
+    )
+    if !sent {
+      hapticsAvailable = hapticBackend.isAvailable()
+    }
+    return sent
   }
 
   private func mappingDidChange() {

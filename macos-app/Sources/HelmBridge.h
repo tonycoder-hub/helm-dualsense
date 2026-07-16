@@ -47,6 +47,9 @@ void HelmSDLStop(void);
 bool HelmSDLHasMicrophoneButton(void);
 int32_t HelmSDLTouchpadCount(void);
 int32_t HelmSDLConnectionState(void);
+bool HelmSDLHasRumble(void);
+bool HelmSDLRumble(uint16_t low_frequency, uint16_t high_frequency, uint32_t duration_ms);
+void HelmSDLStopRumble(void);
 bool HelmSecureInputEnabled(void);
 
 #endif

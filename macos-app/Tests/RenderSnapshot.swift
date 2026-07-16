@@ -27,11 +27,12 @@ struct RenderSnapshot {
     model.selectedAudioDeviceID = 1
     model.leftTriggerValue = 0.35
     model.rightTriggerValue = 0.55
+    model.hapticsAvailable = true
     let root = ControlCenterView()
       .environmentObject(model)
-      .frame(width: 780, height: 1_500)
+      .frame(width: 780, height: 1_620)
     let hostingView = NSHostingView(rootView: root)
-    hostingView.frame = NSRect(x: 0, y: 0, width: 780, height: 1_500)
+    hostingView.frame = NSRect(x: 0, y: 0, width: 780, height: 1_620)
     hostingView.layoutSubtreeIfNeeded()
 
     guard let representation = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds)

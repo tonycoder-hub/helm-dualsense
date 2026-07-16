@@ -64,7 +64,7 @@ struct ControlCenterView: View {
           .foregroundStyle(.secondary)
       }
       Spacer()
-      Text("DEMO 0.5")
+      Text("DEMO 0.6")
         .font(.caption.weight(.bold))
         .foregroundStyle(helmAccent)
         .padding(.horizontal, 10)
@@ -274,6 +274,40 @@ struct ControlCenterView: View {
         }
       }
 
+      Divider().opacity(0.35)
+
+      VStack(alignment: .leading, spacing: 10) {
+        HStack {
+          Label("语义震动", systemImage: "waveform.path")
+            .font(.subheadline.weight(.semibold))
+          Spacer()
+          Toggle("操作震动", isOn: $model.hapticsEnabled)
+            .toggleStyle(.switch)
+            .controlSize(.small)
+          Button("试震") { model.testHaptics() }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(!model.controllerConnected || !model.hapticsEnabled)
+        }
+        LabeledSlider(
+          label: "震动强度",
+          value: $model.hapticIntensity,
+          range: 0.2...1,
+          display: String(format: "%.0f%%", model.hapticIntensity * 100)
+        )
+        HStack {
+          Label(
+            model.hapticCapabilityLabel,
+            systemImage: model.hapticsAvailable ? "checkmark.circle.fill" : "questionmark.circle"
+          )
+          .foregroundStyle(model.hapticsAvailable ? helmAccent : .secondary)
+          Spacer()
+          Text("启用、点击、翻页、快捷键与 PTT 才触发；连续移动不震动")
+            .foregroundStyle(.tertiary)
+        }
+        .font(.caption)
+      }
+
       Text("Options + 触控板为固定安全急停手势，不允许重映射。修改映射时会自动停用控制。")
         .font(.caption)
         .foregroundStyle(.tertiary)
@@ -442,6 +476,12 @@ struct ControlCenterView: View {
           HStack {
             Button("打开辅助功能设置") { model.openAccessibilitySettings() }
             Button("打开声音设置") { model.openSoundSettings() }
+            Spacer()
+            Label(model.updateChannelLabel, systemImage: "arrow.triangle.2.circlepath")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            Button("检查更新") { model.checkForUpdates() }
+              .disabled(!model.canCheckForUpdates)
           }
           .buttonStyle(.link)
         }

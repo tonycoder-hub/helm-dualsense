@@ -15,6 +15,12 @@ static float left_stick_y = 0.0f;
 static float left_trigger = 0.0f;
 static float right_trigger = 0.0f;
 
+static void stop_rumble(void) {
+    if (active_gamepad != NULL) {
+        (void)SDL_RumbleGamepad(active_gamepad, 0, 0, 0);
+    }
+}
+
 static void clear_event(HelmSDLEvent *event) {
     memset(event, 0, sizeof(*event));
 }
@@ -187,6 +193,7 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
 
             case SDL_EVENT_GAMEPAD_REMOVED:
                 if (event_matches_active(event.gdevice.which)) {
+                    stop_rumble();
                     SDL_CloseGamepad(active_gamepad);
                     active_gamepad = NULL;
                     reset_left_stick();
@@ -271,6 +278,7 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
 
 void HelmSDLStop(void) {
     if (active_gamepad != NULL) {
+        stop_rumble();
         SDL_CloseGamepad(active_gamepad);
         active_gamepad = NULL;
     }
@@ -294,6 +302,40 @@ int32_t HelmSDLTouchpadCount(void) {
 
 int32_t HelmSDLConnectionState(void) {
     return active_gamepad == NULL ? -1 : (int32_t)SDL_GetGamepadConnectionState(active_gamepad);
+}
+
+bool HelmSDLHasRumble(void) {
+    if (active_gamepad == NULL) {
+        return false;
+    }
+    SDL_PropertiesID properties = SDL_GetGamepadProperties(active_gamepad);
+    return properties != 0 && SDL_GetBooleanProperty(
+        properties,
+        SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN,
+        false);
+}
+
+bool HelmSDLRumble(
+    uint16_t low_frequency,
+    uint16_t high_frequency,
+    uint32_t duration_ms) {
+    if (active_gamepad == NULL || duration_ms == 0 ||
+        (low_frequency == 0 && high_frequency == 0) || !HelmSDLHasRumble()) {
+        return false;
+    }
+    const uint32_t maximum_duration_ms = 250;
+    if (duration_ms > maximum_duration_ms) {
+        duration_ms = maximum_duration_ms;
+    }
+    return SDL_RumbleGamepad(
+        active_gamepad,
+        low_frequency,
+        high_frequency,
+        duration_ms);
+}
+
+void HelmSDLStopRumble(void) {
+    stop_rumble();
 }
 
 bool HelmSecureInputEnabled(void) {

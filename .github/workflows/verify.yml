@@ -1,0 +1,29 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-contract:
+    runs-on: macos-14
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Validate metadata
+        run: |
+          plutil -lint macos-app/Resources/Info.plist
+          plutil -lint macos-app/Resources/Helm.entitlements
+      - name: Validate release scripts
+        run: |
+          bash -n macos-app/scripts/release-lib.sh
+          bash -n macos-app/scripts/release-preflight.sh
+          bash -n macos-app/scripts/verify-release-artifact.sh
+          bash -n macos-app/Tests/release-preflight-tests.sh
+          bash -n macos-app/Tests/release-security-tests.sh
+          macos-app/Tests/release-preflight-tests.sh
+          macos-app/Tests/release-security-tests.sh

@@ -365,6 +365,145 @@ func testCombinedAccelerationHasAnAbsolutePointerSpeedCap() {
 
 testCombinedAccelerationHasAnAbsolutePointerSpeedCap()
 
+func testPrimaryActionHapticIsCrispAndShort() {
+  let pulse = HapticFeedbackPolicy.pulse(for: .primaryAction, intensity: 1)
+  expect(
+    pulse.highFrequency > pulse.lowFrequency,
+    "primary-action feedback should emphasize the crisp high-frequency actuator"
+  )
+  expect(pulse.durationMilliseconds <= 30, "primary-action feedback should stay short")
+}
+
+testPrimaryActionHapticIsCrispAndShort()
+
+func testWarningHapticFeelsHeavierThanAnAction() {
+  let pulse = HapticFeedbackPolicy.pulse(for: .warning, intensity: 1)
+  expect(
+    pulse.lowFrequency > pulse.highFrequency,
+    "warning feedback should emphasize the low-frequency actuator"
+  )
+  expect(pulse.durationMilliseconds <= 90, "warning feedback should remain bounded")
+}
+
+testWarningHapticFeelsHeavierThanAnAction()
+
+func testHapticIntensityIsClamped() {
+  let maximum = HapticFeedbackPolicy.pulse(for: .preview, intensity: 1)
+  expect(
+    HapticFeedbackPolicy.pulse(for: .preview, intensity: 2) == maximum,
+    "haptic intensity above one should clamp to the tuned maximum"
+  )
+  let muted = HapticFeedbackPolicy.pulse(for: .preview, intensity: -1)
+  expect(
+    muted.lowFrequency == 0 && muted.highFrequency == 0,
+    "negative haptic intensity should clamp to silence"
+  )
+}
+
+testHapticIntensityIsClamped()
+
+func testHapticRateLimiterPreventsBuzzing() {
+  var limiter = HapticRateLimiter(minimumInterval: 0.055)
+  expect(limiter.accepts(now: 10), "the first semantic haptic should be accepted")
+  expect(!limiter.accepts(now: 10.03), "closely repeated haptics should be coalesced")
+  expect(limiter.accepts(now: 10.055), "a haptic at the interval boundary should be accepted")
+  limiter.reset()
+  expect(limiter.accepts(now: 10.056), "safety reset should clear the haptic limiter")
+}
+
+testHapticRateLimiterPreventsBuzzing()
+
+func testHapticGateNeverRumblesAtStartup() {
+  expect(
+    !HapticFeedbackPolicy.shouldPlay(
+      enabled: true,
+      intensity: 0.65,
+      available: true,
+      connected: true,
+      controlsEnabled: false,
+      allowsDisabledControls: false
+    ),
+    "semantic haptics should remain silent until controls are explicitly enabled"
+  )
+  expect(
+    HapticFeedbackPolicy.shouldPlay(
+      enabled: true,
+      intensity: 0.65,
+      available: true,
+      connected: true,
+      controlsEnabled: false,
+      allowsDisabledControls: true
+    ),
+    "the explicit preview action may vibrate while controls are disabled"
+  )
+}
+
+testHapticGateNeverRumblesAtStartup()
+
+func testHapticDefaultsRequireExplicitOptIn() {
+  expect(!HapticFeedbackPolicy.defaultEnabled, "haptics should default to explicit opt-in")
+  expect(
+    abs(HapticFeedbackPolicy.defaultIntensity - 0.35) < 0.001,
+    "the initial haptic intensity should stay conservative"
+  )
+}
+
+testHapticDefaultsRequireExplicitOptIn()
+
+final class RecordingHapticBackend: HapticBackend {
+  var available = true
+  var succeeds = false
+  var played: [HapticPulse] = []
+  var stopCount = 0
+
+  func isAvailable() -> Bool { available }
+
+  func play(_ pulse: HapticPulse) -> Bool {
+    played.append(pulse)
+    return succeeds
+  }
+
+  func stop() {
+    stopCount += 1
+  }
+}
+
+func testFailedHapticDoesNotPoisonTheNextAttempt() {
+  let backend = RecordingHapticBackend()
+  var coordinator = HapticCoordinator(minimumInterval: 0.055)
+  expect(
+    !coordinator.play(
+      .preview,
+      intensity: 0.35,
+      enabled: true,
+      connected: true,
+      controlsEnabled: false,
+      allowsDisabledControls: true,
+      now: 10,
+      backend: backend
+    ),
+    "a backend failure should be reported"
+  )
+  backend.succeeds = true
+  expect(
+    coordinator.play(
+      .preview,
+      intensity: 0.35,
+      enabled: true,
+      connected: true,
+      controlsEnabled: false,
+      allowsDisabledControls: true,
+      now: 10.001,
+      backend: backend
+    ),
+    "a failed output must release the limiter for the next attempt"
+  )
+  coordinator.stop(backend: backend)
+  expect(backend.stopCount == 1, "coordinator stop should release the active backend")
+}
+
+testFailedHapticDoesNotPoisonTheNextAttempt()
+
 let audioInputs = AudioInputCatalog.devices()
 expect(!audioInputs.isEmpty, "at least one Mac-supported audio input should be discoverable")
 expect(audioInputs.contains(where: { $0.isDefault }), "default audio input should be identified")
