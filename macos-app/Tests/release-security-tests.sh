@@ -237,7 +237,7 @@ if any(module.provenance_hex_is_allowed(value) for value in invalid_values):
     raise SystemExit("FAIL: malformed provenance encodings must be rejected")
 PY
 
-xattr -wx com.apple.provenance 00 \
+xattr -wx com.apple.provenance 010200425d648ad2c9a6d0 \
     "$fixture_dir/candidate/Resources/value"
 helm_trees_match_without_signatures "$fixture_dir/source" "$fixture_dir/candidate"
 xattr -d com.apple.provenance "$fixture_dir/candidate/Resources/value"
