@@ -3,6 +3,8 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
+source "$script_dir/local-signing.sh"
+source "$script_dir/local-install.sh"
 app_root=$(cd "$script_dir/.." && pwd)
 source_dir="$app_root/Sources"
 build_dir="$app_root/.build"
@@ -34,16 +36,36 @@ xcrun swiftc \
     -sdk "$sdk" \
     -target "$architecture-apple-macos14.0" \
     "$source_dir/ControlMath.swift" \
+    "$source_dir/ContinuousScrollEvent.swift" \
     "$source_dir/ControllerMapping.swift" \
     "$source_dir/AudioInputCatalog.swift" \
+    "$source_dir/PermissionDiagnostics.swift" \
     "$source_dir/TextInsertionPolicy.swift" \
     "$source_dir/ExternalFocusHistory.swift" \
     "$source_dir/HapticFeedback.swift" \
+    "$source_dir/MappingLayoutPolicy.swift" \
     "$app_root/Tests/main.swift" \
     -framework AVFoundation \
+    -framework AppKit \
     -framework CoreAudio \
+    -framework CoreGraphics \
     -o "$build_dir/ControlMathTests"
 "$build_dir/ControlMathTests"
+
+xcrun swiftc \
+    -swift-version 5 \
+    -warnings-as-errors \
+    -parse-as-library \
+    -sdk "$sdk" \
+    -target "$architecture-apple-macos14.0" \
+    "$source_dir/ControlMath.swift" \
+    "$source_dir/InputCadenceDriver.swift" \
+    "$app_root/Tests/InputCadenceTests.swift" \
+    -o "$build_dir/InputCadenceTests"
+"$build_dir/InputCadenceTests"
+
+bash "$app_root/Tests/local-update-identity-tests.sh"
+bash "$app_root/Tests/in-place-install-tests.sh"
 
 xcrun clang \
     -std=c11 \
@@ -55,6 +77,24 @@ xcrun clang \
     -F "$(dirname "$vendor_framework")" \
     -c "$source_dir/HelmBridge.c" \
     -o "$build_dir/HelmBridge.o"
+
+xcrun clang \
+    -std=c11 \
+    -Wall \
+    -Wextra \
+    -Werror \
+    -arch "$architecture" \
+    -mmacosx-version-min=14.0 \
+    -I "$source_dir" \
+    -F "$(dirname "$vendor_framework")" \
+    "$build_dir/HelmBridge.o" \
+    "$app_root/Tests/HelmBridgeAnalogIntegrationTests.c" \
+    -framework SDL3 \
+    -framework Carbon \
+    -framework CoreVideo \
+    -o "$build_dir/HelmBridgeAnalogIntegrationTests"
+DYLD_FRAMEWORK_PATH="$(dirname "$vendor_framework")" \
+    "$build_dir/HelmBridgeAnalogIntegrationTests"
 
 swift_sources=("$source_dir"/*.swift)
 xcrun swiftc \
@@ -76,6 +116,7 @@ xcrun swiftc \
     -framework Carbon \
     -framework CoreAudio \
     -framework CoreGraphics \
+    -framework CoreVideo \
     -framework Speech \
     -Xlinker -rpath \
     -Xlinker @executable_path/../Frameworks \
@@ -96,27 +137,9 @@ plutil -lint "$staged_app/Contents/Info.plist"
 codesign --force --sign - --timestamp=none "$staged_app/Contents/Frameworks/SDL3.framework"
 codesign --force --deep --sign - --timestamp=none \
     "$staged_app/Contents/Frameworks/Sparkle.framework"
-codesign --force --deep --sign - --timestamp=none --identifier io.github.tonycoder-hub.helm "$staged_app"
-codesign --verify --deep --strict --verbose=2 "$staged_app"
+helm_sign_local_app "$staged_app"
 
 mkdir -p "$install_root"
-install_temp="$install_root/.Helm-Demo-install-$$.app"
-previous_temp="$install_root/.Helm-Demo-previous-$$.app"
-replacement_started=0
-install_verified=0
-cleanup_install() {
-    rm -rf "$install_temp"
-    if [[ "$install_verified" -eq 1 ]]; then
-        rm -rf "$previous_temp"
-    elif [[ -e "$previous_temp" ]]; then
-        rm -rf "$installed_app"
-        mv "$previous_temp" "$installed_app"
-    elif [[ "$replacement_started" -eq 1 ]]; then
-        rm -rf "$installed_app"
-    fi
-}
-trap cleanup_install EXIT
-ditto "$staged_app" "$install_temp"
 
 if pgrep -x HelmDemo >/dev/null 2>&1; then
     osascript -e 'tell application id "io.github.tonycoder-hub.helm" to quit' >/dev/null 2>&1 || true
@@ -130,15 +153,7 @@ if pgrep -x HelmDemo >/dev/null 2>&1; then
     fi
 fi
 
-if [[ -e "$installed_app" ]]; then
-    mv "$installed_app" "$previous_temp"
-fi
-replacement_started=1
-mv "$install_temp" "$installed_app"
-
-codesign --verify --deep --strict --verbose=2 "$installed_app"
-install_verified=1
-rm -rf "$previous_temp"
+helm_install_app_contents "$staged_app" "$installed_app" helm_verify_local_app_identity
 echo "INSTALLED_APP=$installed_app"
 echo "BUNDLE_ID=$(defaults read "$installed_app/Contents/Info.plist" CFBundleIdentifier)"
 

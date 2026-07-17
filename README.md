@@ -1,13 +1,13 @@
 # Helm
 
-Helm is an experimental macOS control center that turns a Sony DualSense into
-one compact desktop controller.
+Helm is an experimental macOS control center that turns a PlayStation, Xbox,
+or Nintendo controller into one compact desktop controller.
 
 ![Helm DualSense control center](docs/reviews/helm-ui-preview.png)
 
 ## Controls
 
-| DualSense input | macOS action |
+| Controller input | macOS action |
 | --- | --- |
 | Left stick | Main pointer movement |
 | Touchpad | Precision pointer movement |
@@ -17,27 +17,36 @@ one compact desktop controller.
 | L2 / R2 | Brake / accelerate pointer and scrolling |
 | D-pad up/down | Page navigation |
 | Microphone button | Push to talk |
-| Hold Options, then press touchpad within two seconds | Enable / emergency stop |
+| Options + touchpad within two seconds | Emergency stop only |
 
 Pointer speed is adjustable in the app. The left stick uses a radial dead zone
 and nonlinear acceleration that ramps up while held, while touchpad movement is
 deliberately slower and capped for precision. The acceleration duration and
 maximum boost are configurable and shown as a live curve.
 
-Cross, Circle, Create, D-pad up/down, and the microphone button can each be
-mapped to left click, right click, page up/down, PTT, one of three configurable
-keyboard shortcuts, or no action. The shortcut slots can invoke an external
-input method without bringing Helm to the foreground. Mappings and motion
-settings persist across launches. The safety chord is intentionally fixed and
-cannot be remapped.
+Any SDL-exposed controller button can be recorded as a single button or a
+combination of up to four buttons, then mapped to clicks, page navigation, PTT,
+or one of three configurable keyboard shortcuts. This includes the four paddle
+positions exposed for controllers such as Xbox Elite and DualSense Edge. The
+shortcut slots can invoke an external input method without bringing Helm to the
+foreground. A slot may also be a held modifier-only action such as Command or
+Control, with independent left/right selection for Command, Control, Option,
+and Shift, so another input source can complete the chord. Recording or editing
+a mapping temporarily suppresses injected actions without disabling the active
+controller session. Mappings and motion settings persist across launches. The safety
+chord is intentionally fixed, cannot be remapped, and never enables controls.
 
 L2 acts like a racing-game brake and R2 acts like an accelerator. Their minimum
 and maximum multipliers are configurable and apply to left-stick/touchpad
 pointer movement and right-stick scrolling.
 
-Controller polling defaults to 120 Hz and can be changed to 60, 90, 120, 144,
-or 240 Hz. Pointer movement is integrated using elapsed time, so changing the
-polling rate affects smoothness rather than speed.
+Input processing uses a configurable 60–240 Hz active cadence and defaults to
+240 Hz. A low-latency radial response floor, configurable response and smoothing
+curves, elapsed-time integration, and fractional continuous-pixel scrolling keep
+light stick input responsive without changing speed across variable frame
+intervals. Helm reads the current left stick, right stick, and triggers on every
+cadence tick, so motion no longer depends on how frequently a particular axis
+happens to emit SDL events.
 
 ## Haptic feedback
 
@@ -50,8 +59,8 @@ adaptive-trigger effects are intentionally a separate future feature. See the
 
 ## Safety model
 
-- Only controllers identified by SDL as PS5-class devices are accepted; Xbox
-  and generic controllers are ignored.
+- SDL-standard PS4/PS5, Xbox 360/One-class, Nintendo Switch Pro, and generic
+  standard mappings are accepted; button labels follow each controller family.
 - Controls start disabled and return to disabled after reconnect, sleep/timer
   gaps, permission loss, disconnect, or app termination.
 - Accessibility, Microphone, and Speech permissions are requested only after an
@@ -60,17 +69,25 @@ adaptive-trigger effects are intentionally a separate future feature. See the
 - Microphone and Speech permissions are requested sequentially, and an
   interrupted on-screen PTT test is cancelled instead of remaining stuck.
 - Recognized text first uses the focused Accessibility text element, then uses
-  Unicode keyboard events for supported editable fields that reject direct AX
-  insertion. Secure Input and secure text fields are refused; the clipboard is
-  never used as a fallback. Direct AX insertion is reported as confirmed;
+  Unicode keyboard events for the confirmed external target when dynamic web
+  editors reject direct AX insertion or expose a generic accessibility role.
+  Helm fixes the external target at PTT start, restores it before delivery,
+  verifies that the focused Accessibility element belongs to that process, and
+  only then posts the Unicode fallback through the global HID event path used by
+  web/Electron editors. Secure Input and secure text
+  fields are refused; the clipboard is never used as a fallback. Direct AX insertion is reported as confirmed;
   Unicode event delivery is explicitly reported as unconfirmed because the
   target application may ignore it.
 
 ## Voice limitation
 
-The DualSense microphone button is used as the PTT control. Audio is captured
-from the macOS-supported input explicitly selected in Helm. The app does not
-claim that the controller's built-in microphone is available as a Mac input.
+The controller microphone/share/capture button can be used as the PTT control.
+Audio is captured from the macOS input explicitly selected in Helm. On the
+target Mac, a wired DualSense currently enumerates as a 48 kHz USB input. Helm
+recognizes that route and tolerates one bounded HID re-enumeration without
+cancelling active recognition; Bluetooth controller audio is not used as a
+music-safe input route. Controller PTT remains active when desktop mouse/key
+injection is disabled, so the external text field can keep focus throughout.
 
 Playback protection is enabled by default. If the system default input is a
 Bluetooth headset microphone, Helm selects a built-in or USB input instead;
@@ -83,13 +100,21 @@ Bluetooth capture immediately cancels that capture before switching the picker.
 
 - macOS 14 or later
 - Apple Command Line Tools or Xcode
-- A DualSense or DualSense Edge
+- A DualSense / DualSense Edge, Xbox-compatible controller, or Nintendo Switch Pro Controller
 - SDL3 3.4.12 macOS framework
 - Sparkle 2.9.4 macOS framework (pinned but inactive until the formal feed is configured)
 
 The current Demo is ad-hoc signed for local development. Real controller,
 Accessibility, and speech behavior should be validated on the target Mac before
 relying on it for everyday use.
+
+When a completed transcript remains in Helm because the destination did not
+accept automatic delivery, activate the intended external text field again,
+return to Helm, and choose **重新发送到外部焦点**. The post-recognition
+activation is consumed once, and the process PID plus launch time is checked on
+every retry to reject PID reuse. The recovery action otherwise reuses the same
+Accessibility, secure-input, and bounded-retry checks; it does not record audio
+again or use the clipboard.
 
 Formal Developer ID signing, notarization, and signed Sparkle updates are
 fail-closed preparation work, not current Demo capabilities. See the
@@ -134,12 +159,19 @@ Then run:
 macos-app/scripts/build-and-install.sh --launch
 ```
 
-The script runs the deterministic control-math/audio tests, compiles Swift and C
-with warnings treated as errors, embeds SDL3 and the pinned Sparkle framework,
-applies an ad-hoc signature, and installs to `~/Applications/Helm Demo.app`. It
-temporarily preserves the prior
-installation during replacement, verifies the installed copy, and removes the
-temporary copy after success.
+The script runs the deterministic control-math/audio tests plus an isolated SDL
+virtual-gamepad analog-read integration test, compiles Swift and C with warnings treated as errors, embeds SDL3 and the pinned Sparkle framework,
+applies a stable local-development ad-hoc requirement, and installs to
+`~/Applications/Helm Demo.app`. Updates keep that top-level app directory in
+place, transactionally replace only `Contents`, verify the installed copy, and
+remove the temporary rollback immediately after success. Moving an older build onto this stable identity
+can require one final Accessibility/Microphone/Speech grant; subsequent local
+builds keep the same designated requirement at the same path. On the target Mac,
+six observed updates from build 11 through build 17 each changed the app
+CDHash while preserving the app-directory inode and designated requirement;
+Accessibility, Microphone, and Speech all remained authorized after every
+relaunch. That evidence is scoped to this local Demo identity and does not claim
+the same behavior for a future Developer ID distribution.
 
 The Demo has no feed URL or update public key, so its updater stays disabled and
 does not contact a placeholder service. Formal release verification additionally

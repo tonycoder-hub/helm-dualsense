@@ -51,7 +51,7 @@ struct ControlCenterView: View {
               endPoint: .bottomTrailing
             )
           )
-        Image(systemName: "playstation.logo")
+        Image(systemName: model.controllerSystemImage)
           .font(.system(size: 26, weight: .semibold))
           .foregroundStyle(.white)
       }
@@ -60,11 +60,11 @@ struct ControlCenterView: View {
       VStack(alignment: .leading, spacing: 3) {
         Text("Helm")
           .font(.system(size: 27, weight: .bold, design: .rounded))
-        Text("DualSense · 鼠标 · 滚动 · 语音输入")
+        Text("PlayStation / Xbox / Nintendo · 鼠标 · 滚动 · 语音输入")
           .foregroundStyle(.secondary)
       }
       Spacer()
-      Text("DEMO 0.6")
+      Text("DEMO 0.9.2")
         .font(.caption.weight(.bold))
         .foregroundStyle(helmAccent)
         .padding(.horizontal, 10)
@@ -76,9 +76,9 @@ struct ControlCenterView: View {
   private var statusStrip: some View {
     HStack(spacing: 12) {
       StatusPill(
-        title: "DualSense",
+        title: model.controllerConnected ? model.controllerFamily.title : "手柄",
         value: model.controllerConnected ? "已连接" : "未连接",
-        systemImage: "playstation.logo",
+        systemImage: model.controllerSystemImage,
         color: model.controllerConnected ? helmAccent : .orange
       )
       StatusPill(
@@ -106,7 +106,7 @@ struct ControlCenterView: View {
             .font(.callout)
             .foregroundStyle(.secondary)
             .lineLimit(2)
-          Text("启动与重连后始终默认停用。Options + 触控板键是紧急停止手势。")
+          Text("普通连接默认停用；有线手柄因 USB 音频短暂重枚举时会自动恢复。\(model.safetyChordLabel) 是紧急停止手势。")
             .font(.caption)
             .foregroundStyle(.tertiary)
         }
@@ -144,12 +144,18 @@ struct ControlCenterView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
           Picker("输入轮询率", selection: $model.inputPollingRate) {
-            ForEach([60.0, 90.0, 120.0, 144.0, 240.0], id: \.self) { rate in
+            ForEach(InputCadencePolicy.selectableRates, id: \.self) { rate in
               Text("\(Int(rate)) Hz").tag(rate)
             }
           }
           .labelsHidden()
-          .frame(width: 110)
+          Text(
+            model.measuredInputRate > 0
+              ? "实测 \(Int(model.measuredInputRate.rounded())) Hz"
+              : model.inputCadenceLabel
+          )
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(helmAccent)
         }
       }
     }
@@ -164,7 +170,7 @@ struct ControlCenterView: View {
         MappingRow(source: "触控板", target: "精细光标", icon: "cursorarrow")
         MappingRow(source: "右摇杆", target: "滚动", icon: "scroll")
         MappingRow(source: "L2 / R2", target: "刹车 / 加速", icon: "gauge.with.dots.needle.50percent")
-        MappingRow(source: "Options + 触控板", target: "急停", icon: "stop.fill")
+        MappingRow(source: model.safetyChordLabel, target: "急停", icon: "stop.fill")
       }
     }
     .frame(maxWidth: .infinity)
@@ -181,17 +187,51 @@ struct ControlCenterView: View {
           .foregroundStyle(helmAccent)
       }
 
-      LazyVGrid(
-        columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)],
-        spacing: 10
-      ) {
-        ActionMappingPicker(label: "Cross", selection: $model.mapping.cross)
-        ActionMappingPicker(label: "Circle", selection: $model.mapping.circle)
-        ActionMappingPicker(label: "Create", selection: $model.mapping.create)
-        ActionMappingPicker(label: "D-pad 上", selection: $model.mapping.dpadUp)
-        ActionMappingPicker(label: "D-pad 下", selection: $model.mapping.dpadDown)
-        ActionMappingPicker(label: "麦克风键", selection: $model.mapping.microphone)
+      VStack(spacing: 9) {
+        ForEach(model.mapping.bindings, id: \.chord) { binding in
+          RecordedMappingRow(
+            label: binding.chord.label(family: model.controllerFamily),
+            action: Binding(
+              get: { binding.action },
+              set: { model.setMappingAction($0, for: binding.chord) }
+            ),
+            onRecord: { model.beginMappingCapture(replacing: binding.chord) },
+            onDelete: { model.removeMapping(binding.chord) }
+          )
+        }
+
+        HStack(spacing: 10) {
+          Picker("新映射动作", selection: $model.pendingMappingAction) {
+            ForEach(ControllerAction.allCases.filter { $0 != .none }) { action in
+              Label(action.title, systemImage: action.systemImage).tag(action)
+            }
+          }
+          .labelsHidden()
+          .frame(maxWidth: .infinity)
+          Button("录入新按键 / 组合键") { model.beginMappingCapture() }
+            .buttonStyle(.borderedProminent)
+            .tint(helmBlue)
+        }
+
+        if model.isRecordingMapping {
+          HStack(spacing: 10) {
+            ProgressView()
+              .controlSize(.small)
+            Text(model.mappingCapturePrompt)
+              .font(.callout)
+              .foregroundStyle(helmAccent)
+            Spacer()
+            Button("取消录入") { model.cancelMappingCapture() }
+              .buttonStyle(.bordered)
+          }
+          .padding(10)
+          .background(helmAccent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        }
       }
+
+      Text("可直接录入最多 4 键组合；Xbox Elite、DualSense Edge 等由 SDL 暴露的 4 个背键也可录入。前缀冲突会由新映射替换，避免单键和组合键同时误触发。")
+        .font(.caption)
+        .foregroundStyle(.tertiary)
 
       Divider().opacity(0.35)
 
@@ -204,7 +244,19 @@ struct ControlCenterView: View {
             .font(.caption)
             .foregroundStyle(.tertiary)
         }
-        HStack(alignment: .top, spacing: 12) {
+        LazyVGrid(
+          columns: [
+            GridItem(
+              .adaptive(
+                minimum: CGFloat(MappingLayoutPolicy.minimumShortcutEditorWidth)
+              ),
+              spacing: CGFloat(MappingLayoutPolicy.shortcutSpacing),
+              alignment: .top
+            )
+          ],
+          alignment: .leading,
+          spacing: CGFloat(MappingLayoutPolicy.shortcutSpacing)
+        ) {
           ShortcutSlotEditor(title: "快捷键 1", shortcut: $model.shortcutSettings.slot1)
           ShortcutSlotEditor(title: "快捷键 2", shortcut: $model.shortcutSettings.slot2)
           ShortcutSlotEditor(title: "快捷键 3", shortcut: $model.shortcutSettings.slot3)
@@ -215,6 +267,18 @@ struct ControlCenterView: View {
 
       HStack(alignment: .top, spacing: 22) {
         VStack(spacing: 12) {
+          LabeledSlider(
+            label: "摇杆响应曲线",
+            value: $model.stickResponseExponent,
+            range: 0.7...2.4,
+            display: String(format: "%.2f", model.stickResponseExponent)
+          )
+          LabeledSlider(
+            label: "平滑时间",
+            value: $model.stickSmoothingMilliseconds,
+            range: 0...60,
+            display: String(format: "%.0f ms", model.stickSmoothingMilliseconds)
+          )
           LabeledSlider(
             label: "长按加速时间",
             value: $model.stickAccelerationDuration,
@@ -308,7 +372,7 @@ struct ControlCenterView: View {
         .font(.caption)
       }
 
-      Text("Options + 触控板为固定安全急停手势，不允许重映射。修改映射时会自动停用控制。")
+      Text("\(model.safetyChordLabel) 为固定安全急停手势，不允许重映射。录入或修改映射时只暂挂桌面注入，不会断开手柄或关闭控制会话。")
         .font(.caption)
         .foregroundStyle(.tertiary)
     }
@@ -426,6 +490,12 @@ struct ControlCenterView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
           Spacer()
+          Button("重新发送到外部焦点") { model.retryExternalTextDelivery() }
+            .buttonStyle(.plain)
+            .font(.caption)
+            .foregroundStyle(model.canRetryExternalTextDelivery ? helmAccent : .secondary)
+            .disabled(!model.canRetryExternalTextDelivery)
+            .help("识别完成后重新聚焦外部文本框，再返回 Helm 点击；会复用自动写入的目标校验")
           Button("清空") { model.clearTranscript() }
             .buttonStyle(.plain)
             .font(.caption)
@@ -440,10 +510,21 @@ struct ControlCenterView: View {
 
       HStack {
         Image(systemName: "info.circle")
-        Text("Sony 不支持 DualSense 内置麦克风作为 Mac 输入；手柄麦克风键只负责 PTT，实际音源显示在上方。")
+        if model.selectedAudioDevice?.isControllerRoutedUSB == true {
+          Text("已选中手柄的 USB 音频输入。启动采集时若 HID 短暂重枚举，Helm 会保留语音并在同一手柄恢复后继续控制。")
+        } else {
+          Text("有线 DualSense 在这台 Mac 上可枚举为 48 kHz USB 输入；蓝牙手柄音频仍不会作为安全的音乐共存路径。实际音源以顶部选择为准。")
+        }
       }
       .font(.caption)
       .foregroundStyle(.secondary)
+
+      Text("手柄 PTT 独立于“桌面控制”开关；即使鼠标注入停用，也可以在外部应用保持焦点时按住映射键说话。")
+        .font(.caption)
+        .foregroundStyle(.tertiary)
+      Text("若自动写入未出现：识别完成后重新在目标文本框点一下，返回 Helm 点击“重新发送到外部焦点”；这不会重新录音。")
+        .font(.caption)
+        .foregroundStyle(.tertiary)
     }
   }
 
@@ -455,7 +536,7 @@ struct ControlCenterView: View {
             DiagnosticItem(label: "控制器", value: model.controllerName)
             DiagnosticItem(label: "连接", value: model.connectionLabel)
             DiagnosticItem(
-              label: "麦克风键",
+              label: "功能键 / 麦克风键",
               value: model.microphoneButtonAvailable ? "可用" : "未验证"
             )
             DiagnosticItem(label: "触控板", value: "\(model.touchpadCount) 个")
@@ -501,7 +582,7 @@ struct MenuBarPanel: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
       HStack {
-        Image(systemName: "playstation.logo")
+        Image(systemName: model.controllerSystemImage)
           .foregroundStyle(helmAccent)
         Text("Helm")
           .font(.headline)
@@ -612,23 +693,33 @@ private struct MappingRow: View {
   }
 }
 
-private struct ActionMappingPicker: View {
+private struct RecordedMappingRow: View {
   let label: String
-  @Binding var selection: ControllerAction
+  @Binding var action: ControllerAction
+  let onRecord: () -> Void
+  let onDelete: () -> Void
 
   var body: some View {
     HStack(spacing: 10) {
       Text(label)
         .font(.callout.weight(.medium))
-        .frame(width: 82, alignment: .leading)
-      Picker(label, selection: $selection) {
-        ForEach(ControllerAction.allCases) { action in
-          Label(action.title, systemImage: action.systemImage)
-            .tag(action)
+        .frame(minWidth: 150, alignment: .leading)
+      Picker(label, selection: $action) {
+        ForEach(ControllerAction.allCases.filter { $0 != .none }) { candidate in
+          Label(candidate.title, systemImage: candidate.systemImage)
+            .tag(candidate)
         }
       }
       .labelsHidden()
       .frame(maxWidth: .infinity)
+      Button("重新录入", action: onRecord)
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+      Button(action: onDelete) {
+        Image(systemName: "trash")
+      }
+      .buttonStyle(.borderless)
+      .foregroundStyle(.secondary)
     }
     .padding(.horizontal, 10)
     .padding(.vertical, 6)
@@ -651,25 +742,62 @@ private struct ShortcutSlotEditor: View {
           .foregroundStyle(helmAccent)
       }
       Picker("按键", selection: $shortcut.key) {
+        Text("仅修饰键（按住）").tag(nil as ShortcutKey?)
         ForEach(ShortcutKey.allCases) { key in
-          Text(key.title).tag(key)
+          Text(key.title).tag(Optional(key))
         }
       }
       .labelsHidden()
 
-      HStack(spacing: 5) {
-        Toggle("⌃", isOn: $shortcut.control)
-        Toggle("⌥", isOn: $shortcut.option)
-        Toggle("⇧", isOn: $shortcut.shift)
-        Toggle("⌘", isOn: $shortcut.command)
+      LazyVGrid(
+        columns: [GridItem(.flexible()), GridItem(.flexible())],
+        spacing: 6
+      ) {
+        ModifierSidePicker(title: "Control", symbol: "⌃", side: $shortcut.controlSide)
+        ModifierSidePicker(title: "Option", symbol: "⌥", side: $shortcut.optionSide)
+        ModifierSidePicker(title: "Shift", symbol: "⇧", side: $shortcut.shiftSide)
+        ModifierSidePicker(title: "Command", symbol: "⌘", side: $shortcut.commandSide)
       }
-      .toggleStyle(.button)
-      .buttonStyle(.bordered)
-      .controlSize(.mini)
     }
     .padding(10)
     .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     .frame(maxWidth: .infinity)
+  }
+}
+
+private struct ModifierSidePicker: View {
+  let title: String
+  let symbol: String
+  @Binding var side: ModifierSide
+
+  var body: some View {
+    Picker(selection: $side) {
+      Text("关闭").tag(ModifierSide.none)
+      Text("左侧 \(symbol)").tag(ModifierSide.left)
+      Text("右侧 \(symbol)").tag(ModifierSide.right)
+    } label: {
+      HStack(spacing: 4) {
+        Text(title)
+          .foregroundStyle(.secondary)
+        Spacer(minLength: 2)
+        Text(displayLabel)
+          .monospaced()
+      }
+      .font(.caption2)
+      .frame(maxWidth: .infinity)
+    }
+    .pickerStyle(.menu)
+    .controlSize(.mini)
+    .frame(maxWidth: .infinity)
+    .help("\(title)：关闭、左侧或右侧")
+  }
+
+  private var displayLabel: String {
+    switch side {
+    case .none: return symbol
+    case .left: return "左\(symbol)"
+    case .right: return "右\(symbol)"
+    }
   }
 }
 

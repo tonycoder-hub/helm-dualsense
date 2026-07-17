@@ -31,15 +31,59 @@ enum AudioInputTransport: String, Hashable {
 struct AudioInputDevice: Identifiable, Hashable {
   let id: AudioDeviceID
   let name: String
+  let manufacturer: String
   let isDefault: Bool
   let transport: AudioInputTransport
 
+  init(
+    id: AudioDeviceID,
+    name: String,
+    manufacturer: String = "",
+    isDefault: Bool,
+    transport: AudioInputTransport
+  ) {
+    self.id = id
+    self.name = name
+    self.manufacturer = manufacturer
+    self.isDefault = isDefault
+    self.transport = transport
+  }
+
   var mayInterruptPlayback: Bool { transport.mayInterruptPlayback }
+
+  var isControllerRoutedUSB: Bool {
+    guard transport == .usb else { return false }
+    let normalizedName = name.folding(
+      options: [.caseInsensitive, .diacriticInsensitive],
+      locale: .current
+    )
+    let normalizedManufacturer = manufacturer.folding(
+      options: [.caseInsensitive, .diacriticInsensitive],
+      locale: .current
+    )
+    return normalizedName.localizedCaseInsensitiveContains("dualsense")
+      || (normalizedManufacturer.localizedCaseInsensitiveContains("sony")
+        && normalizedName.localizedCaseInsensitiveContains("controller"))
+  }
 }
 
 struct AudioPlaybackProtectionPlan {
   let replacement: AudioInputDevice?
   let shouldStopCapture: Bool
+}
+
+struct AudioRefreshGate {
+  private var inFlight = false
+
+  mutating func begin() -> Bool {
+    guard !inFlight else { return false }
+    inFlight = true
+    return true
+  }
+
+  mutating func end() {
+    inFlight = false
+  }
 }
 
 enum AudioInputCatalog {
@@ -107,6 +151,10 @@ enum AudioInputCatalog {
       return AudioInputDevice(
         id: identifier,
         name: name,
+        manufacturer: deviceString(
+          identifier,
+          selector: kAudioObjectPropertyManufacturer
+        ) ?? "",
         isDefault: defaultID.map { identifier == $0 } ?? false,
         transport: transportType(identifier)
       )
@@ -165,8 +213,15 @@ enum AudioInputCatalog {
   }
 
   private static func deviceName(_ deviceID: AudioDeviceID) -> String? {
+    deviceString(deviceID, selector: kAudioObjectPropertyName)
+  }
+
+  private static func deviceString(
+    _ deviceID: AudioDeviceID,
+    selector: AudioObjectPropertySelector
+  ) -> String? {
     var address = AudioObjectPropertyAddress(
-      mSelector: kAudioObjectPropertyName,
+      mSelector: selector,
       mScope: kAudioObjectPropertyScopeGlobal,
       mElement: kAudioObjectPropertyElementMain
     )

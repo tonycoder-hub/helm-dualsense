@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -236,6 +237,54 @@ func testUnicodeFallbackIsReportedAsUnconfirmedDispatch() {
 
 testUnicodeFallbackIsReportedAsUnconfirmedDispatch()
 
+func testConfirmedExternalWebEditorUsesUnicodeDelivery() {
+  let decision = TextInsertionPolicy.decision(
+    secureInputEnabled: false,
+    secureField: false,
+    focusedRole: "AXGroup",
+    selectedTextSettable: false,
+    confirmedExternalTarget: true
+  )
+  expect(
+    decision == .unicodeKeyboardEvents,
+    "a confirmed external web editor should accept Unicode delivery even when AX exposes a group"
+  )
+}
+
+testConfirmedExternalWebEditorUsesUnicodeDelivery()
+
+func testExternalFocusMustBelongToTheCapturedApplication() {
+  expect(
+    TextInsertionPolicy.externalFocusReadiness(
+      expectedProcessIdentifier: 42,
+      helmProcessIdentifier: 10,
+      frontmostProcessIdentifier: 42,
+      focusedElementProcessIdentifier: 10
+    ) == .retry,
+    "a stale Helm AX focus must not be accepted for an external insertion target"
+  )
+  expect(
+    TextInsertionPolicy.externalFocusReadiness(
+      expectedProcessIdentifier: 42,
+      helmProcessIdentifier: 10,
+      frontmostProcessIdentifier: 42,
+      focusedElementProcessIdentifier: nil
+    ) == .retry,
+    "an external app whose AX focus is not ready yet should be retried"
+  )
+  expect(
+    TextInsertionPolicy.externalFocusReadiness(
+      expectedProcessIdentifier: 42,
+      helmProcessIdentifier: 10,
+      frontmostProcessIdentifier: 42,
+      focusedElementProcessIdentifier: 42
+    ) == .ready,
+    "only a focused AX element owned by the captured app is ready for insertion"
+  )
+}
+
+testExternalFocusMustBelongToTheCapturedApplication()
+
 func testShortcutSettingsPersistLosslessly() {
   let settings = ControllerShortcutSettings.standard
   let data = try! JSONEncoder().encode(settings)
@@ -301,6 +350,279 @@ func testShortcutDefinitionBuildsMacStyleLabel() {
 
 testShortcutDefinitionBuildsMacStyleLabel()
 
+func testModifierOnlyShortcutDoesNotRequireAPrimaryKey() {
+  let commandOnly = KeyboardShortcutDefinition(
+    key: nil,
+    command: true,
+    option: false,
+    control: false,
+    shift: false
+  )
+  expect(commandOnly.isModifierOnly, "Command-only should be a valid modifier-only shortcut")
+  expect(commandOnly.label == "⌘", "Command-only should have a readable macOS label")
+  expect(
+    commandOnly.modifierVirtualKeyCodes == [55],
+    "Command-only should use the left Command virtual key"
+  )
+}
+
+testModifierOnlyShortcutDoesNotRequireAPrimaryKey()
+
+func testModifierOnlyShortcutPersistsLosslessly() {
+  let commandOnly = KeyboardShortcutDefinition(
+    key: nil,
+    command: true,
+    option: false,
+    control: false,
+    shift: false
+  )
+  let data = try! JSONEncoder().encode(commandOnly)
+  let decoded = try! JSONDecoder().decode(KeyboardShortcutDefinition.self, from: data)
+  expect(decoded == commandOnly, "a modifier-only shortcut should survive persistence")
+}
+
+testModifierOnlyShortcutPersistsLosslessly()
+
+func testRightCommandModifierIsRepresentedPhysically() {
+  let rightCommandOnly = KeyboardShortcutDefinition(
+    key: nil,
+    commandSide: .right,
+    optionSide: .none,
+    controlSide: .none,
+    shiftSide: .none
+  )
+  expect(rightCommandOnly.isModifierOnly, "right Command alone should be a valid held shortcut")
+  expect(rightCommandOnly.label == "右⌘", "right Command should be distinguishable in the UI")
+  expect(
+    rightCommandOnly.modifierVirtualKeyCodes == [54],
+    "right Command should use the macOS right-Command virtual key code"
+  )
+}
+
+testRightCommandModifierIsRepresentedPhysically()
+
+func testLegacyBooleanModifiersMigrateToLeftPhysicalKeys() {
+  let legacy = Data(
+    #"{"key":null,"command":true,"option":false,"control":true,"shift":false}"#.utf8
+  )
+  let decoded = try! JSONDecoder().decode(KeyboardShortcutDefinition.self, from: legacy)
+  expect(
+    decoded.commandSide == .left && decoded.controlSide == .left,
+    "existing shortcut settings should migrate to the historically emitted left modifiers"
+  )
+  expect(
+    decoded.modifierVirtualKeyCodes == [59, 55],
+    "legacy Control+Command should retain its physical key codes after migration"
+  )
+}
+
+testLegacyBooleanModifiersMigrateToLeftPhysicalKeys()
+
+func testRightCommandShortcutEmitsPhysicalModifierTransitions() {
+  let shortcut = KeyboardShortcutDefinition(
+    key: .d,
+    commandSide: .right,
+    optionSide: .none,
+    controlSide: .none,
+    shiftSide: .none
+  )
+  expect(
+    KeyboardShortcutEventPlanner.plan(for: shortcut) == [
+      KeyboardEventStep(
+        virtualKeyCode: 54,
+        pressed: true,
+        activeModifierVirtualKeyCodes: [54]
+      ),
+      KeyboardEventStep(
+        virtualKeyCode: 2,
+        pressed: true,
+        activeModifierVirtualKeyCodes: [54]
+      ),
+      KeyboardEventStep(
+        virtualKeyCode: 2,
+        pressed: false,
+        activeModifierVirtualKeyCodes: [54]
+      ),
+      KeyboardEventStep(
+        virtualKeyCode: 54,
+        pressed: false,
+        activeModifierVirtualKeyCodes: []
+      ),
+    ],
+    "right Command combinations should emit the physical right modifier around the primary key"
+  )
+}
+
+testRightCommandShortcutEmitsPhysicalModifierTransitions()
+
+func testModifierHoldCoordinatorPreservesOtherSlotsFlags() {
+  var coordinator = ModifierHoldCoordinator()
+  expect(
+    coordinator.update(slot: 1, source: 10, modifierCodes: [55], pressed: true)
+      == [
+        ModifierKeyTransition(
+          virtualKeyCode: 55,
+          pressed: true,
+          activeModifierVirtualKeyCodes: [55]
+        )
+      ],
+    "the first Command owner should press the physical modifier"
+  )
+  expect(
+    coordinator.update(slot: 2, source: 11, modifierCodes: [59], pressed: true)
+      == [
+        ModifierKeyTransition(
+          virtualKeyCode: 59,
+          pressed: true,
+          activeModifierVirtualKeyCodes: [59, 55]
+        )
+      ],
+    "pressing Control in another slot must preserve Command in the event flags"
+  )
+  expect(
+    coordinator.update(slot: 1, source: 10, modifierCodes: [55], pressed: false)
+      == [
+        ModifierKeyTransition(
+          virtualKeyCode: 55,
+          pressed: false,
+          activeModifierVirtualKeyCodes: [59]
+        )
+      ],
+    "releasing Command must leave another slot's Control flag active"
+  )
+}
+
+testModifierHoldCoordinatorPreservesOtherSlotsFlags()
+
+func testModifierHoldCoordinatorReferenceCountsOverlappingSlots() {
+  var coordinator = ModifierHoldCoordinator()
+  _ = coordinator.update(slot: 1, source: 20, modifierCodes: [55], pressed: true)
+  expect(
+    coordinator.update(slot: 2, source: 21, modifierCodes: [55], pressed: true).isEmpty,
+    "a second Command owner must not repeat physical key-down"
+  )
+  expect(
+    coordinator.update(slot: 1, source: 20, modifierCodes: [55], pressed: false).isEmpty,
+    "releasing one slot must not release Command while another slot owns it"
+  )
+  expect(
+    coordinator.update(slot: 2, source: 21, modifierCodes: [55], pressed: false)
+      == [
+        ModifierKeyTransition(
+          virtualKeyCode: 55,
+          pressed: false,
+          activeModifierVirtualKeyCodes: []
+        )
+      ],
+    "the final Command owner should release the physical modifier"
+  )
+}
+
+testModifierHoldCoordinatorReferenceCountsOverlappingSlots()
+
+func testModifierHoldCoordinatorResetReleasesEveryPhysicalModifier() {
+  var coordinator = ModifierHoldCoordinator()
+  _ = coordinator.update(slot: 1, source: 30, modifierCodes: [59, 55], pressed: true)
+  expect(
+    coordinator.reset()
+      == [
+        ModifierKeyTransition(
+          virtualKeyCode: 55,
+          pressed: false,
+          activeModifierVirtualKeyCodes: [59]
+        ),
+        ModifierKeyTransition(
+          virtualKeyCode: 59,
+          pressed: false,
+          activeModifierVirtualKeyCodes: []
+        ),
+      ],
+    "emergency cleanup should release all physical modifiers in reverse order"
+  )
+  expect(coordinator.reset().isEmpty, "a second modifier cleanup should be a no-op")
+}
+
+testModifierHoldCoordinatorResetReleasesEveryPhysicalModifier()
+
+func testVoiceStartupSizedTimerGapDoesNotEmergencyStop() {
+  expect(
+    !TimerGapPolicy.shouldEmergencyStop(elapsed: 0.6, hasActiveInput: true),
+    "normal synchronous voice startup must not be mistaken for system sleep"
+  )
+}
+
+testVoiceStartupSizedTimerGapDoesNotEmergencyStop()
+
+func testActualSleepSizedTimerGapStillEmergencyStops() {
+  expect(
+    TimerGapPolicy.shouldEmergencyStop(elapsed: 2.1, hasActiveInput: true),
+    "a multi-second cadence gap must retain the safety stop"
+  )
+}
+
+testActualSleepSizedTimerGapStillEmergencyStops()
+
+func testLongFrameDoesNotIntegrateAStaleStickDelta() {
+  expect(
+    TimerGapPolicy.integrationDeltaTime(elapsed: 0.6) == 0,
+    "a long frame should resume without a cursor jump"
+  )
+  expect(
+    TimerGapPolicy.integrationDeltaTime(elapsed: 1.0 / 120.0) == 1.0 / 120.0,
+    "a normal display frame should retain its elapsed time"
+  )
+}
+
+testLongFrameDoesNotIntegrateAStaleStickDelta()
+
+func testConfigurableActiveInputCadenceDefaultsToHighRate() {
+  expect(
+    InputCadencePolicy.defaultRate == 240,
+    "active analog sampling should default to the requested high rate"
+  )
+  expect(
+    InputCadencePolicy.clampedRate(500) == 240
+      && InputCadencePolicy.clampedRate(30) == 60,
+    "input cadence should remain within the supported 60–240 Hz range"
+  )
+  expect(
+    InputCadencePolicy.interval(for: 240) == 1.0 / 240.0,
+    "the 240 Hz option should schedule a true 240 Hz active sample interval"
+  )
+}
+
+testConfigurableActiveInputCadenceDefaultsToHighRate()
+
+func testPolledAnalogSampleReplacesStaleEventState() {
+  var state = ControllerAnalogState(
+    leftX: 0.1,
+    leftY: 0.2,
+    rightY: 0.3,
+    leftTrigger: 0.4,
+    rightTrigger: 0.5
+  )
+  state.applyPolledSample(
+    ControllerAnalogSample(
+      leftX: 0.75,
+      leftY: -0.6,
+      rightY: 0.9,
+      leftTrigger: 0.2,
+      rightTrigger: 1
+    )
+  )
+  expect(
+    state.leftX == 0.75 && state.leftY == -0.6,
+    "display-cadence polling should replace sparse left-stick events"
+  )
+  expect(state.rightY == 0.9, "the same sample should update right-stick scrolling")
+  expect(
+    state.leftTrigger == 0.2 && state.rightTrigger == 1,
+    "the same sample should update both racing triggers"
+  )
+}
+
+testPolledAnalogSampleReplacesStaleEventState()
+
 func testHelmActivationPreservesLastExternalFocusOwner() {
   var history = ExternalFocusHistory()
   history.recordActivation(processIdentifier: 42, helmProcessIdentifier: 10)
@@ -315,6 +637,111 @@ func testHelmActivationPreservesLastExternalFocusOwner() {
 }
 
 testHelmActivationPreservesLastExternalFocusOwner()
+
+func testPhysicalPTTCapturesTheCurrentExternalFocusOwner() {
+  var history = ExternalFocusHistory()
+  history.recordActivation(processIdentifier: 42, helmProcessIdentifier: 10)
+  expect(
+    history.insertionTarget(
+      currentProcessIdentifier: 77,
+      helmProcessIdentifier: 10
+    ) == 77,
+    "physical PTT should target the external app focused when dictation begins"
+  )
+}
+
+testPhysicalPTTCapturesTheCurrentExternalFocusOwner()
+
+func testManualRetryRequiresAFreshExternalActivationAfterRecognition() {
+  var history = ExternalFocusHistory()
+  history.recordActivation(
+    processIdentifier: 42,
+    processLaunchTime: 100,
+    helmProcessIdentifier: 10
+  )
+  let recognitionCompletedAt = history.activationGeneration
+  expect(
+    history.manualRetryTarget(after: recognitionCompletedAt) == nil,
+    "a pre-existing external PID must not be reused for a later manual retry"
+  )
+  history.recordActivation(
+    processIdentifier: 10,
+    processLaunchTime: 200,
+    helmProcessIdentifier: 10
+  )
+  expect(
+    history.manualRetryTarget(after: recognitionCompletedAt) == nil,
+    "returning to Helm must not count as a fresh external target"
+  )
+  history.recordActivation(
+    processIdentifier: 42,
+    processLaunchTime: 100,
+    helmProcessIdentifier: 10
+  )
+  expect(
+    history.manualRetryTarget(after: recognitionCompletedAt)
+      == ExternalProcessIdentity(processIdentifier: 42, launchTime: 100),
+    "an external app activated after recognition should become the retry target"
+  )
+}
+
+testManualRetryRequiresAFreshExternalActivationAfterRecognition()
+
+func testManualRetryRejectsAReusedProcessIdentifier() {
+  let captured = ExternalProcessIdentity(processIdentifier: 42, launchTime: 100)
+  expect(
+    ExternalProcessIdentityPolicy.matches(
+      expected: captured,
+      candidateProcessIdentifier: 42,
+      candidateLaunchTime: 100
+    ),
+    "the original process instance should remain valid"
+  )
+  expect(
+    !ExternalProcessIdentityPolicy.matches(
+      expected: captured,
+      candidateProcessIdentifier: 42,
+      candidateLaunchTime: 200
+    ),
+    "the same PID with a different launch time must be treated as PID reuse"
+  )
+}
+
+testManualRetryRejectsAReusedProcessIdentifier()
+
+func testVoiceDeliveryKeepsThePTTStartTargetWhenTheFrontmostAppChanges() {
+  expect(
+    VoiceInsertionTargetPolicy.deliveryTarget(
+      capturedProcessIdentifier: 42,
+      currentProcessIdentifier: 77,
+      helmProcessIdentifier: 10
+    ) == 42,
+    "recognition completion must not retarget speech to a newly frontmost application"
+  )
+  expect(
+    VoiceInsertionTargetPolicy.deliveryTarget(
+      capturedProcessIdentifier: nil,
+      currentProcessIdentifier: 77,
+      helmProcessIdentifier: 10
+    ) == nil,
+    "a session without a captured target must not hijack whichever app is frontmost later"
+  )
+}
+
+testVoiceDeliveryKeepsThePTTStartTargetWhenTheFrontmostAppChanges()
+
+func testRetryableVoiceDeliveryStopsAfterTheAttemptBudgetIsExhausted() {
+  expect(
+    VoiceTextDeliveryRetryPolicy.nextAttemptCount(from: 12) == 11,
+    "a delayed AX focus should consume one bounded retry"
+  )
+  expect(
+    VoiceTextDeliveryRetryPolicy.nextAttemptCount(from: 0) == nil,
+    "exhausted AX focus retries must fail closed instead of looping forever"
+  )
+}
+
+testRetryableVoiceDeliveryStopsAfterTheAttemptBudgetIsExhausted()
 
 func testEmptyFocusHistoryFallsBackToWindowOrder() {
   let history = ExternalFocusHistory()
@@ -503,6 +930,617 @@ func testFailedHapticDoesNotPoisonTheNextAttempt() {
 }
 
 testFailedHapticDoesNotPoisonTheNextAttempt()
+
+func testStickFilterIsTimeInvariantAcrossJitteredFrames() {
+  func finalVector(for intervals: [TimeInterval]) -> CGPoint {
+    var filter = StickMotionFilter()
+    var value = CGPoint.zero
+    for interval in intervals {
+      value = filter.update(
+        x: 0.62,
+        y: -0.24,
+        deadZone: 0.16,
+        responseExponent: 1.35,
+        responseTime: 0.024,
+        deltaTime: interval
+      )
+    }
+    return value
+  }
+
+  let uniform = finalVector(for: Array(repeating: 1.0 / 120.0, count: 120))
+  let jittered = finalVector(
+    for: Array(repeating: [1.0 / 240.0, 1.0 / 80.0], count: 60).flatMap { $0 })
+  expect(
+    hypot(uniform.x - jittered.x, uniform.y - jittered.y) < 0.000_001,
+    "stick smoothing should depend on elapsed time, not callback regularity"
+  )
+}
+
+testStickFilterIsTimeInvariantAcrossJitteredFrames()
+
+func testStickFilterStopsImmediatelyInsideTheDeadZone() {
+  var filter = StickMotionFilter()
+  _ = filter.update(
+    x: 0.8,
+    y: 0,
+    deadZone: 0.16,
+    responseExponent: 1.35,
+    responseTime: 0.024,
+    deltaTime: 1.0 / 120.0
+  )
+  let stopped = filter.update(
+    x: 0.05,
+    y: 0.04,
+    deadZone: 0.16,
+    responseExponent: 1.35,
+    responseTime: 0.024,
+    deltaTime: 1.0 / 120.0
+  )
+  expect(stopped == .zero, "returning to the dead zone must not leave cursor glide")
+}
+
+testStickFilterStopsImmediatelyInsideTheDeadZone()
+
+func testMappingCaptureSuspendsInjectionWithoutDisablingTheControlSession() {
+  let plan = MappingCapturePolicy.begin(
+    controlsEnabled: true,
+    voiceActive: true,
+    injectedInputActive: true
+  )
+  expect(
+    plan.controlsEnabledAfterTransition,
+    "starting button capture must preserve the user's enabled control session"
+  )
+  expect(plan.shouldStopVoice, "button capture should safely stop an active voice session")
+  expect(
+    plan.shouldReleaseInjectedInputs,
+    "button capture should release active mouse and modifier outputs before recording"
+  )
+}
+
+testMappingCaptureSuspendsInjectionWithoutDisablingTheControlSession()
+
+func testControllerChordRecordingWaitsForEveryButtonRelease() {
+  var recorder = ControllerChordRecorder()
+  recorder.begin()
+  expect(
+    recorder.process(button: .leftShoulder, pressed: true) == nil,
+    "the first held button should not finish a chord"
+  )
+  expect(
+    recorder.process(button: .south, pressed: true) == nil,
+    "a second held button should remain part of the recording"
+  )
+  expect(
+    recorder.process(button: .south, pressed: false) == nil,
+    "recording should wait for the final held button"
+  )
+  let chord = recorder.process(button: .leftShoulder, pressed: false)
+  expect(
+    chord == ControllerChord(buttons: [.south, .leftShoulder]),
+    "the completed recording should contain the canonical two-button chord"
+  )
+}
+
+testControllerChordRecordingWaitsForEveryButtonRelease()
+
+func testComboMappingPersistsAndReplacesAmbiguousPrefixes() {
+  var mapping = ControllerMapping.standard
+  let combo = ControllerChord(buttons: [.leftShoulder, .south])!
+  let removed = mapping.upsert(ControllerBinding(chord: combo, action: .shortcut1))
+  expect(
+    removed.contains(where: { $0.chord == ControllerChord(buttons: [.south]) }),
+    "a combo should replace an ambiguous single-button prefix"
+  )
+  expect(mapping.action(for: combo) == .shortcut1, "the combo should resolve to its action")
+  let data = try! JSONEncoder().encode(mapping)
+  let decoded = try! JSONDecoder().decode(ControllerMapping.self, from: data)
+  expect(decoded == mapping, "combo mappings should persist losslessly")
+}
+
+testComboMappingPersistsAndReplacesAmbiguousPrefixes()
+
+func testControllerFamiliesUsePhysicalFaceButtonLabels() {
+  expect(
+    ControllerPresentation.label(for: .south, family: .playStation) == "Cross",
+    "PlayStation south should be Cross"
+  )
+  expect(
+    ControllerPresentation.label(for: .south, family: .xbox) == "A",
+    "Xbox south should be A"
+  )
+  expect(
+    ControllerPresentation.label(for: .south, family: .nintendo) == "B",
+    "Nintendo south should be B"
+  )
+  expect(
+    Set(ControllerButton.professionalButtons) == Set([
+      .rightPaddle1, .leftPaddle1, .rightPaddle2, .leftPaddle2,
+    ]),
+    "professional controller paddles should be recordable inputs"
+  )
+}
+
+testControllerFamiliesUsePhysicalFaceButtonLabels()
+
+func testBindingResolverEmitsOnePressAndOneReleaseForAChord() {
+  let combo = ControllerChord(buttons: [.leftShoulder, .south])!
+  let mapping = ControllerMapping(bindings: [
+    ControllerBinding(chord: combo, action: .pushToTalk)
+  ])
+  var resolver = ControllerBindingResolver()
+  expect(
+    resolver.process(button: .leftShoulder, pressed: true, mapping: mapping).isEmpty,
+    "an incomplete chord should not trigger"
+  )
+  let pressed = resolver.process(button: .south, pressed: true, mapping: mapping)
+  expect(
+    pressed == [ControllerActionTransition(chord: combo, action: .pushToTalk, pressed: true)],
+    "completing a chord should emit exactly one press"
+  )
+  expect(
+    resolver.process(button: .south, pressed: true, mapping: mapping).isEmpty,
+    "a repeated down event should not retrigger an active chord"
+  )
+  let released = resolver.process(button: .leftShoulder, pressed: false, mapping: mapping)
+  expect(
+    released == [ControllerActionTransition(chord: combo, action: .pushToTalk, pressed: false)],
+    "breaking a chord should emit exactly one release"
+  )
+}
+
+testBindingResolverEmitsOnePressAndOneReleaseForAChord()
+
+func testPushToTalkDoesNotDependOnDesktopControlInjection() {
+  expect(
+    !ControllerAction.pushToTalk.requiresDesktopControls,
+    "controller PTT should remain available while mouse injection is disabled"
+  )
+  expect(
+    ControllerAction.primaryClick.requiresDesktopControls,
+    "mouse clicks must remain gated by the desktop control switch"
+  )
+  expect(
+    ControllerAction.shortcut1.requiresDesktopControls,
+    "external keyboard shortcuts must remain gated by the desktop control switch"
+  )
+}
+
+testPushToTalkDoesNotDependOnDesktopControlInjection()
+
+func testVoiceSessionPoliciesCoverPermissionRefreshAndFinalization() {
+  expect(
+    !VoiceSessionPolicy.canBeginAfterEnvironmentRefresh(hasPressOwner: false),
+    "recognition must not start after permission refresh removed its PTT owner"
+  )
+  expect(
+    VoiceSessionPolicy.canBeginAfterEnvironmentRefresh(hasPressOwner: true),
+    "a still-held PTT owner should be allowed to start recognition"
+  )
+  expect(
+    VoiceSessionPolicy.isActiveForReconnect(isListening: false, isFinalizing: true),
+    "the final recognition commit window is still an active voice session"
+  )
+}
+
+testVoiceSessionPoliciesCoverPermissionRefreshAndFinalization()
+
+func testPermissionDiagnosticsEmitOnlyTheInitialOrChangedSnapshot() {
+  var tracker = PermissionDiagnosticTracker()
+  let authorized = PermissionDiagnosticSnapshot(
+    accessibilityGranted: true,
+    microphoneRawValue: 3,
+    speechRawValue: 3
+  )
+  expect(
+    tracker.recordIfChanged(authorized) == authorized,
+    "the initial permission snapshot should be observable"
+  )
+  expect(
+    tracker.recordIfChanged(authorized) == nil,
+    "unchanged permission polling must not spam the unified log"
+  )
+  let microphoneDenied = PermissionDiagnosticSnapshot(
+    accessibilityGranted: true,
+    microphoneRawValue: 2,
+    speechRawValue: 3
+  )
+  expect(
+    tracker.recordIfChanged(microphoneDenied) == microphoneDenied,
+    "a changed permission should emit one new diagnostic snapshot"
+  )
+  expect(
+    authorized.logMessage
+      == "permission_snapshot accessibility=1 microphone=3 speech=3",
+    "the diagnostic log must contain status values only"
+  )
+}
+
+testPermissionDiagnosticsEmitOnlyTheInitialOrChangedSnapshot()
+
+func testSafetyChordIsStopOnlyOrderIndependentAndFullyReserved() {
+  var playStationTracker = SafetyChordTracker()
+  expect(
+    !playStationTracker.process(
+      button: .touchpad,
+      pressed: true,
+      family: .playStation,
+      now: 10
+    ),
+    "the first safety button should only arm the chord"
+  )
+  expect(
+    playStationTracker.process(
+      button: .start,
+      pressed: true,
+      family: .playStation,
+      now: 10.5
+    ),
+    "PlayStation safety chord should work when touchpad is pressed first"
+  )
+
+  var xboxTracker = SafetyChordTracker()
+  expect(
+    !xboxTracker.process(button: .back, pressed: true, family: .xbox, now: 20),
+    "Xbox Back should arm the safety chord"
+  )
+  expect(
+    xboxTracker.process(button: .start, pressed: true, family: .xbox, now: 21),
+    "Xbox Start+Back safety chord should work in either press order"
+  )
+
+  let safetySuperset = ControllerChord(buttons: [.start, .touchpad, .leftShoulder])!
+  expect(
+    SafetyChordPolicy.isReserved(safetySuperset, family: .playStation),
+    "a mapping containing the fixed safety pair must be rejected as unreachable"
+  )
+  expect(
+    SafetyChordPolicy.isReserved(
+      ControllerChord(buttons: [.start, .back])!,
+      family: .playStation
+    ),
+    "global mappings must reserve the Xbox/Switch safety pair while PlayStation is connected"
+  )
+  expect(
+    SafetyChordPolicy.isReserved(
+      ControllerChord(buttons: [.start, .touchpad])!,
+      family: .xbox
+    ),
+    "global mappings must reserve the PlayStation safety pair while Xbox is connected"
+  )
+}
+
+testSafetyChordIsStopOnlyOrderIndependentAndFullyReserved()
+
+func testDualSenseUSBAudioAllowsABoundedControllerReconnect() {
+  let controllerMic = AudioInputDevice(
+    id: 700,
+    name: "DualSense Wireless Controller",
+    manufacturer: "Sony Interactive Entertainment",
+    isDefault: false,
+    transport: .usb
+  )
+  let identity = ControllerIdentity(family: .playStation, vendorID: 0x054C, productID: 0x0CE6)
+  expect(controllerMic.isControllerRoutedUSB, "the enumerated DualSense USB input should be recognized")
+  expect(
+    ControllerReconnectPolicy.shouldWait(
+      hasActiveVoiceSession: true,
+      selectedAudioDevice: controllerMic,
+      connection: .wired,
+      controller: identity
+    ),
+    "starting wired DualSense audio should tolerate one bounded HID re-enumeration"
+  )
+  expect(
+    ControllerReconnectPolicy.canResume(expected: identity, candidate: identity),
+    "the same non-serial controller identity should resume after re-enumeration"
+  )
+  expect(
+    ControllerReconnectPolicy.shouldWait(
+      hasActiveVoiceSession: true,
+      selectedAudioDevice: controllerMic,
+      connection: .unknown,
+      controller: identity
+    ),
+    "USB controller audio should prove a wired route when SDL reports unknown transport"
+  )
+  expect(
+    !ControllerReconnectPolicy.shouldWait(
+      hasActiveVoiceSession: true,
+      selectedAudioDevice: controllerMic,
+      connection: .wireless,
+      controller: identity
+    ),
+    "an explicitly wireless controller must not enter the USB HID reconnect grace"
+  )
+  expect(
+    ControllerReconnectPolicy.canMigrateAudioRoute(connection: .unknown),
+    "the confirmed USB audio route should survive an unknown SDL transport"
+  )
+  expect(
+    !ControllerReconnectPolicy.canMigrateAudioRoute(connection: .wireless),
+    "an explicitly wireless route must not be treated as controller USB audio"
+  )
+}
+
+testDualSenseUSBAudioAllowsABoundedControllerReconnect()
+
+func testUnrelatedUSBMicrophoneDoesNotMaskARealDisconnect() {
+  let genericUSB = AudioInputDevice(
+    id: 701,
+    name: "Studio USB Mic",
+    manufacturer: "Example Audio",
+    isDefault: false,
+    transport: .usb
+  )
+  let identity = ControllerIdentity(family: .playStation, vendorID: 0x054C, productID: 0x0CE6)
+  expect(
+    !ControllerReconnectPolicy.shouldWait(
+      hasActiveVoiceSession: true,
+      selectedAudioDevice: genericUSB,
+      connection: .wired,
+      controller: identity
+    ),
+    "an unrelated USB microphone must not hide a real controller unplug"
+  )
+}
+
+testUnrelatedUSBMicrophoneDoesNotMaskARealDisconnect()
+
+func testAudioRefreshGateCoalescesBackgroundCatalogReads() {
+  var gate = AudioRefreshGate()
+  expect(gate.begin(), "the first audio catalog refresh should start")
+  expect(!gate.begin(), "a second catalog refresh must not overlap the first")
+  gate.end()
+  expect(gate.begin(), "the gate should reopen after applying a completed refresh")
+}
+
+testAudioRefreshGateCoalescesBackgroundCatalogReads()
+
+func testManualVoiceDeliveryRequiresCompletedTextAndAnIdleSession() {
+  expect(
+    VoiceManualDeliveryPolicy.deliverableText(
+      " 重新发送这段文字 ",
+      isListening: false,
+      isFinalizing: false,
+      deliveryInProgress: false
+    ) == " 重新发送这段文字 ",
+    "a completed transcript should remain available for an explicit external retry"
+  )
+  expect(
+    VoiceManualDeliveryPolicy.deliverableText(
+      "   \n",
+      isListening: false,
+      isFinalizing: false,
+      deliveryInProgress: false
+    ) == nil,
+    "blank preview text must never be injected"
+  )
+  expect(
+    VoiceManualDeliveryPolicy.deliverableText(
+      "尚未完成",
+      isListening: true,
+      isFinalizing: false,
+      deliveryInProgress: false
+    ) == nil,
+    "manual delivery must not race a live recognition session"
+  )
+  expect(
+    VoiceManualDeliveryPolicy.deliverableText(
+      "正在收尾",
+      isListening: false,
+      isFinalizing: true,
+      deliveryInProgress: false
+    ) == nil,
+    "manual delivery must wait for recognition finalization"
+  )
+  expect(
+    VoiceManualDeliveryPolicy.deliverableText(
+      "自动写入仍在重试",
+      isListening: false,
+      isFinalizing: false,
+      deliveryInProgress: true
+    ) == nil,
+    "manual delivery must not race an automatic or previous delivery attempt"
+  )
+}
+
+testManualVoiceDeliveryRequiresCompletedTextAndAnIdleSession()
+
+func testDefaultStickResponseMovesWithinFirstDisplayFrame() {
+  var filter = StickMotionFilter()
+  let deltaTime = 1.0 / 240.0
+  var distance = 0.0
+  for tick in 1...4 {
+    let vector = filter.update(
+      x: 0.20,
+      y: 0,
+      deadZone: ControlMath.stickDeadZone,
+      responseExponent: ControlMath.defaultStickResponseExponent,
+      responseTime: ControlMath.defaultStickSmoothingTime,
+      deltaTime: deltaTime
+    )
+    distance += ControlMath.integratedStickPointerDelta(
+      x: vector.x,
+      y: vector.y,
+      gain: 1,
+      maximumSpeed: ControlMath.stickPointerMaximumSpeed,
+      holdDuration: Double(tick) * deltaTime,
+      accelerationDuration: 1.6,
+      maximumBoost: 2.2,
+      deltaTime: deltaTime
+    ).x
+  }
+  expect(
+    distance >= 1.5,
+    "a light left-stick push should become visible within the first 60 Hz display frame"
+  )
+}
+
+testDefaultStickResponseMovesWithinFirstDisplayFrame()
+
+func testContinuousScrollDoesNotWaitForAnIntegerPixel() {
+  let delta = ControlMath.continuousScrollDelta(
+    axis: 0.20,
+    deadZone: ControlMath.scrollStickDeadZone,
+    gain: 10,
+    deltaTime: 1.0 / 240.0
+  )
+  expect(delta != 0, "a light right-stick push should scroll on its first sampled frame")
+  expect(abs(delta) < 1, "a light 240 Hz sample should retain its fractional pixel precision")
+}
+
+testContinuousScrollDoesNotWaitForAnIntegerPixel()
+
+func testContinuousScrollEventPreservesFractionalPixels() {
+  var accumulator = ContinuousScrollAccumulator()
+  let sample = accumulator.update(precisePixels: -0.125)
+  expect(
+    sample.pointPixels == -1,
+    "the first meaningful fractional sample should produce an immediate point impulse"
+  )
+  expect(
+    abs(sample.precisePixels + 0.125) < 0.000_1,
+    "the point impulse must retain the original precise delta"
+  )
+  guard let event = ContinuousScrollEventFactory.make(sample: sample) else {
+    expect(false, "continuous scroll event creation should succeed")
+    return
+  }
+  expect(
+    abs(event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1) + 0.125) < 0.000_1,
+    "continuous scroll events should retain a signed fractional fixed-point delta"
+  )
+  expect(
+    event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1) == -1,
+    "AppKit-compatible point scrolling should start on the same frame"
+  )
+  guard let appKitEvent = NSEvent(cgEvent: event) else {
+    expect(false, "AppKit should accept the continuous CoreGraphics scroll event")
+    return
+  }
+  expect(
+    appKitEvent.hasPreciseScrollingDeltas,
+    "AppKit should expose the event as precise pixel scrolling"
+  )
+  expect(
+    abs(appKitEvent.deltaY + 0.125) < 0.000_1,
+    "the event's precise delta should remain fractional for compatible applications"
+  )
+  expect(
+    appKitEvent.scrollingDeltaY == -1,
+    "AppKit's preferred scrolling API should receive the compensated point impulse"
+  )
+}
+
+testContinuousScrollEventPreservesFractionalPixels()
+
+func testContinuousScrollPointImpulsesPreserveLongTermDistance() {
+  var accumulator = ContinuousScrollAccumulator()
+  var pointTotal: Int32 = 0
+  for _ in 0..<16 {
+    pointTotal += accumulator.update(precisePixels: -0.125).pointPixels
+  }
+  expect(
+    pointTotal == -2,
+    "first-frame point compensation should repay itself and preserve long-term distance"
+  )
+  expect(
+    accumulator.update(precisePixels: 0).pointPixels == 0,
+    "centering the stick should reset the point accumulator"
+  )
+}
+
+testContinuousScrollPointImpulsesPreserveLongTermDistance()
+
+func testContinuousScrollAccumulatorRespondsToDirectionChanges() {
+  var accumulator = ContinuousScrollAccumulator()
+  expect(
+    accumulator.update(precisePixels: -0.125).pointPixels == -1,
+    "the initial downward scroll should start immediately"
+  )
+  expect(
+    accumulator.update(precisePixels: 0.125).pointPixels == 1,
+    "reversing the stick should discard old point debt and respond immediately"
+  )
+
+  accumulator.reset()
+  expect(
+    accumulator.update(precisePixels: -0.0625).pointPixels == 0,
+    "sub-threshold precision should not create a one-point noise impulse"
+  )
+  expect(
+    accumulator.update(precisePixels: -0.0625).pointPixels == -1,
+    "meaningful sub-pixel input should reach the startup threshold without integer delay"
+  )
+}
+
+testContinuousScrollAccumulatorRespondsToDirectionChanges()
+
+func testContinuousScrollStartupCompensationHasBoundedShortGestureError() {
+  var accumulator = ContinuousScrollAccumulator()
+  let initial = accumulator.update(precisePixels: -0.125)
+  let stopped = accumulator.update(precisePixels: 0)
+  let pointDistance = Double(initial.pointPixels + stopped.pointPixels)
+  expect(
+    abs(pointDistance - initial.precisePixels) < 1,
+    "an immediate release may quantize, but its point error must stay below one point"
+  )
+
+  let downward = accumulator.update(precisePixels: -0.25)
+  let reversed = accumulator.update(precisePixels: 0.125)
+  let preciseDistance = downward.precisePixels + reversed.precisePixels
+  let reversedPointDistance = Double(downward.pointPixels + reversed.pointPixels)
+  expect(
+    abs(reversedPointDistance - preciseDistance) < 1,
+    "an asymmetric direction reversal must discard at most a sub-point remainder"
+  )
+}
+
+testContinuousScrollStartupCompensationHasBoundedShortGestureError()
+
+func testExternalUnicodeFallbackUsesGuardedGlobalHIDRoute() {
+  expect(
+    TextInsertionPolicy.unicodeEventPostingRoute(
+      confirmedExternalTarget: true,
+      focusReadiness: .ready,
+      secureInputEnabled: false
+    ) == .globalHID,
+    "a freshly confirmed external editor should receive the browser-compatible HID route"
+  )
+  expect(
+    TextInsertionPolicy.unicodeEventPostingRoute(
+      confirmedExternalTarget: true,
+      focusReadiness: .retry,
+      secureInputEnabled: false
+    ) == .refused,
+    "the HID route must refuse a stale or changing external focus"
+  )
+  expect(
+    TextInsertionPolicy.unicodeEventPostingRoute(
+      confirmedExternalTarget: true,
+      focusReadiness: .ready,
+      secureInputEnabled: true
+    ) == .refused,
+    "Unicode dispatch must recheck Secure Input at the final posting boundary"
+  )
+}
+
+testExternalUnicodeFallbackUsesGuardedGlobalHIDRoute()
+
+func testShortcutEditorsWrapBeforeControlsOverlap() {
+  expect(
+    MappingLayoutPolicy.shortcutColumnCount(for: 700) == 2,
+    "the mapping card should use two shortcut columns at the app's normal content width"
+  )
+  expect(
+    MappingLayoutPolicy.shortcutColumnCount(for: 420) == 1,
+    "a narrow mapping card should stack shortcut editors"
+  )
+}
+
+testShortcutEditorsWrapBeforeControlsOverlap()
 
 let audioInputs = AudioInputCatalog.devices()
 expect(!audioInputs.isEmpty, "at least one Mac-supported audio input should be discoverable")

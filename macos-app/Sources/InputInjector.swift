@@ -6,10 +6,13 @@ import Foundation
 enum TextInsertionResult {
   case inserted(String)
   case dispatched(String)
+  case retryable(String)
   case refused(String)
 }
 
 enum InputInjector {
+  private static var pointerTarget: CGPoint?
+
   static func accessibilityTrusted(prompt: Bool = false) -> Bool {
     guard prompt else { return AXIsProcessTrusted() }
     let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
@@ -22,7 +25,7 @@ enum InputInjector {
     leftButtonDown: Bool,
     rightButtonDown: Bool
   ) {
-    guard let location = CGEvent(source: nil)?.location else { return }
+    guard let location = pointerTarget ?? CGEvent(source: nil)?.location else { return }
     let bounds = CGDisplayBounds(CGMainDisplayID())
     let target = CGPoint(
       x: min(max(location.x + dx, bounds.minX), bounds.maxX - 1),
@@ -46,6 +49,15 @@ enum InputInjector {
       mouseCursorPosition: target,
       mouseButton: eventButton
     )?.post(tap: .cghidEventTap)
+    pointerTarget = target
+  }
+
+  static func beginPointerSession() {
+    pointerTarget = CGEvent(source: nil)?.location
+  }
+
+  static func endPointerSession() {
+    pointerTarget = nil
   }
 
   static func mouseButton(_ button: CGMouseButton, pressed: Bool) {
@@ -66,16 +78,8 @@ enum InputInjector {
     )?.post(tap: .cghidEventTap)
   }
 
-  static func scroll(pixels: Int32) {
-    guard pixels != 0 else { return }
-    CGEvent(
-      scrollWheelEvent2Source: nil,
-      units: .pixel,
-      wheelCount: 1,
-      wheel1: pixels,
-      wheel2: 0,
-      wheel3: 0
-    )?.post(tap: .cghidEventTap)
+  static func scroll(sample: ContinuousScrollSample) {
+    ContinuousScrollEventFactory.make(sample: sample)?.post(tap: .cghidEventTap)
   }
 
   static func page(direction: Int32) {
@@ -90,33 +94,65 @@ enum InputInjector {
   }
 
   static func sendShortcut(_ shortcut: KeyboardShortcutDefinition) -> Bool {
-    guard accessibilityTrusted(), !HelmSecureInputEnabled() else { return false }
-    var flags: CGEventFlags = []
-    if shortcut.command { flags.insert(.maskCommand) }
-    if shortcut.option { flags.insert(.maskAlternate) }
-    if shortcut.control { flags.insert(.maskControl) }
-    if shortcut.shift { flags.insert(.maskShift) }
+    guard accessibilityTrusted(), !HelmSecureInputEnabled() else {
+      return false
+    }
+    let plan = KeyboardShortcutEventPlanner.plan(for: shortcut)
+    guard !plan.isEmpty else { return false }
 
-    guard
-      let keyDown = CGEvent(
+    var events: [CGEvent] = []
+    for step in plan {
+      guard let event = CGEvent(
         keyboardEventSource: nil,
-        virtualKey: CGKeyCode(shortcut.key.virtualKeyCode),
-        keyDown: true
-      ),
-      let keyUp = CGEvent(
-        keyboardEventSource: nil,
-        virtualKey: CGKeyCode(shortcut.key.virtualKeyCode),
-        keyDown: false
-      )
-    else { return false }
-    keyDown.flags = flags
-    keyUp.flags = flags
-    keyDown.post(tap: .cghidEventTap)
-    keyUp.post(tap: .cghidEventTap)
+        virtualKey: CGKeyCode(step.virtualKeyCode),
+        keyDown: step.pressed
+      ) else { return false }
+      event.flags = flags(forModifierVirtualKeyCodes: step.activeModifierVirtualKeyCodes)
+      events.append(event)
+    }
+    events.forEach { $0.post(tap: .cghidEventTap) }
     return true
   }
 
-  static func insertAtFocusedTextElement(_ text: String) -> TextInsertionResult {
+  static func applyModifierKeyTransitions(
+    _ transitions: [ModifierKeyTransition]
+  ) -> Bool {
+    guard !transitions.isEmpty else { return true }
+    if transitions.contains(where: \.pressed) {
+      guard accessibilityTrusted(), !HelmSecureInputEnabled() else { return false }
+    }
+
+    var events: [CGEvent] = []
+    for transition in transitions {
+      guard
+        let event = CGEvent(
+          keyboardEventSource: nil,
+          virtualKey: CGKeyCode(transition.virtualKeyCode),
+          keyDown: transition.pressed
+        )
+      else { return false }
+      event.flags = flags(forModifierVirtualKeyCodes: transition.activeModifierVirtualKeyCodes)
+      events.append(event)
+    }
+    events.forEach { $0.post(tap: .cghidEventTap) }
+    return true
+  }
+
+  private static func flags(
+    forModifierVirtualKeyCodes codes: [UInt16]
+  ) -> CGEventFlags {
+    var flags: CGEventFlags = []
+    if codes.contains(where: { $0 == 59 || $0 == 62 }) { flags.insert(.maskControl) }
+    if codes.contains(where: { $0 == 58 || $0 == 61 }) { flags.insert(.maskAlternate) }
+    if codes.contains(where: { $0 == 56 || $0 == 60 }) { flags.insert(.maskShift) }
+    if codes.contains(where: { $0 == 55 || $0 == 54 }) { flags.insert(.maskCommand) }
+    return flags
+  }
+
+  static func insertAtFocusedTextElement(
+    _ text: String,
+    expectedProcessIdentifier: Int32? = nil
+  ) -> TextInsertionResult {
     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return .refused("没有可写入的识别文本")
     }
@@ -124,19 +160,43 @@ enum InputInjector {
       return .refused("缺少辅助功能权限，文本只保留在 Helm 中")
     }
     let secureInputEnabled = HelmSecureInputEnabled()
-
-    let system = AXUIElementCreateSystemWide()
-    var value: CFTypeRef?
-    guard
-      AXUIElementCopyAttributeValue(
-        system,
-        kAXFocusedUIElementAttribute as CFString,
-        &value
-      ) == .success, let value
-    else {
-      return .refused("当前没有可编辑的文本焦点")
+    let helmProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+    let element: AXUIElement
+    let confirmedExternalTarget: Bool
+    if let expectedProcessIdentifier {
+      guard expectedProcessIdentifier > 0,
+        expectedProcessIdentifier != helmProcessIdentifier
+      else { return .refused("外部文本目标无效") }
+      guard let focusedElement = focusedElement(for: expectedProcessIdentifier) else {
+        return .retryable("外部应用的文本焦点尚未就绪")
+      }
+      switch externalFocusReadiness(
+        expectedProcessIdentifier: expectedProcessIdentifier,
+        focusedElement: focusedElement
+      ) {
+      case .ready:
+        element = focusedElement
+        confirmedExternalTarget = true
+      case .retry:
+        return .retryable("外部应用的文本焦点尚未就绪")
+      case .refused:
+        return .refused("外部文本目标无效")
+      }
+    } else {
+      let system = AXUIElementCreateSystemWide()
+      var value: CFTypeRef?
+      guard
+        AXUIElementCopyAttributeValue(
+          system,
+          kAXFocusedUIElementAttribute as CFString,
+          &value
+        ) == .success, let value
+      else {
+        return .refused("当前没有可编辑的文本焦点")
+      }
+      element = unsafeBitCast(value, to: AXUIElement.self)
+      confirmedExternalTarget = false
     }
-    let element = unsafeBitCast(value, to: AXUIElement.self)
 
     var subroleValue: CFTypeRef?
     _ = AXUIElementCopyAttributeValue(
@@ -164,10 +224,21 @@ enum InputInjector {
       secureInputEnabled: secureInputEnabled,
       secureField: secureField,
       focusedRole: focusedRole,
-      selectedTextSettable: settableStatus == .success && settable.boolValue
+      selectedTextSettable: settableStatus == .success && settable.boolValue,
+      confirmedExternalTarget: confirmedExternalTarget
     )
 
     if decision == .accessibilitySelectedText {
+      if let expectedProcessIdentifier {
+        switch externalTargetStillFocused(
+          expectedProcessIdentifier: expectedProcessIdentifier,
+          originalElement: element
+        ) {
+        case .ready: break
+        case .retry: return .retryable("外部应用的文本焦点仍在切换")
+        case .refused: return .refused("外部文本目标无效")
+        }
+      }
       let status = AXUIElementSetAttributeValue(
         element,
         kAXSelectedTextAttribute as CFString,
@@ -178,7 +249,8 @@ enum InputInjector {
         secureInputEnabled: secureInputEnabled,
         secureField: secureField,
         focusedRole: focusedRole,
-        selectedTextSettable: false
+        selectedTextSettable: false,
+        confirmedExternalTarget: confirmedExternalTarget
       )
       if decision == .refused {
         return .refused("文本写入失败（AX \(status.rawValue)）")
@@ -206,9 +278,84 @@ enum InputInjector {
         unicodeString: buffer.baseAddress
       )
     }
+
+    var postingFocusReadiness: ExternalTextFocusReadiness?
+    if let expectedProcessIdentifier {
+      let readiness = externalTargetStillFocused(
+        expectedProcessIdentifier: expectedProcessIdentifier,
+        originalElement: element
+      )
+      postingFocusReadiness = readiness
+      switch readiness {
+      case .ready: break
+      case .retry: return .retryable("外部应用的文本焦点仍在切换")
+      case .refused: return .refused("外部文本目标无效")
+      }
+    }
+    let secureInputAtPosting = HelmSecureInputEnabled()
+    if secureInputAtPosting {
+      return .refused("检测到系统安全输入，已拒绝写入")
+    }
+    guard
+      TextInsertionPolicy.unicodeEventPostingRoute(
+        confirmedExternalTarget: confirmedExternalTarget,
+        focusReadiness: postingFocusReadiness,
+        secureInputEnabled: secureInputAtPosting
+      ) == .globalHID
+    else {
+      return .retryable("外部应用的文本焦点仍在切换")
+    }
     keyDown.post(tap: .cghidEventTap)
     keyUp.post(tap: .cghidEventTap)
-    return .dispatched("Unicode 键盘事件")
+    return .dispatched(
+      confirmedExternalTarget
+        ? "Unicode 键盘事件（已锁定外部焦点）"
+        : "Unicode 键盘事件"
+    )
+  }
+
+  private static func focusedElement(for processIdentifier: Int32) -> AXUIElement? {
+    let application = AXUIElementCreateApplication(pid_t(processIdentifier))
+    var value: CFTypeRef?
+    guard
+      AXUIElementCopyAttributeValue(
+        application,
+        kAXFocusedUIElementAttribute as CFString,
+        &value
+      ) == .success, let value
+    else { return nil }
+    return unsafeBitCast(value, to: AXUIElement.self)
+  }
+
+  private static func processIdentifier(of element: AXUIElement) -> Int32? {
+    var processIdentifier = pid_t(0)
+    guard AXUIElementGetPid(element, &processIdentifier) == .success else { return nil }
+    return Int32(processIdentifier)
+  }
+
+  private static func externalFocusReadiness(
+    expectedProcessIdentifier: Int32,
+    focusedElement: AXUIElement
+  ) -> ExternalTextFocusReadiness {
+    TextInsertionPolicy.externalFocusReadiness(
+      expectedProcessIdentifier: expectedProcessIdentifier,
+      helmProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+      frontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+      focusedElementProcessIdentifier: processIdentifier(of: focusedElement)
+    )
+  }
+
+  private static func externalTargetStillFocused(
+    expectedProcessIdentifier: Int32,
+    originalElement: AXUIElement
+  ) -> ExternalTextFocusReadiness {
+    guard let currentElement = focusedElement(for: expectedProcessIdentifier) else { return .retry }
+    let readiness = externalFocusReadiness(
+      expectedProcessIdentifier: expectedProcessIdentifier,
+      focusedElement: currentElement
+    )
+    guard readiness == .ready else { return readiness }
+    return CFEqual(currentElement, originalElement) ? .ready : .retry
   }
 
   static func openAccessibilitySettings() {

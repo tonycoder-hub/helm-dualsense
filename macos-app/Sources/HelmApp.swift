@@ -17,7 +17,7 @@ struct HelmDemoApp: App {
   @StateObject private var model = AppModel()
 
   var body: some Scene {
-    Window("Helm · DualSense 控制中心", id: "control-center") {
+    Window("Helm · 手柄控制中心", id: "control-center") {
       ControlCenterView()
         .environmentObject(model)
         .frame(minWidth: 720, idealWidth: 780, minHeight: 650, idealHeight: 760)
@@ -31,7 +31,7 @@ struct HelmDemoApp: App {
         .environmentObject(model)
         .onAppear { model.start() }
     } label: {
-      Image(systemName: model.isListening ? "waveform.circle.fill" : "playstation.logo")
+      Image(systemName: model.isListening ? "waveform.circle.fill" : model.controllerSystemImage)
     }
     .menuBarExtraStyle(.window)
   }

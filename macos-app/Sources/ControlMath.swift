@@ -1,10 +1,92 @@
 import CoreGraphics
 import Foundation
 
+struct StickMotionFilter {
+  private static let minimumOutputMagnitude = 0.12
+  private static let minimumOutputRampWidth = 0.08
+  private var filtered = CGPoint.zero
+
+  mutating func update(
+    x: Double,
+    y: Double,
+    deadZone: Double,
+    responseExponent: Double,
+    responseTime: TimeInterval,
+    deltaTime: TimeInterval
+  ) -> CGPoint {
+    let rawMagnitude = hypot(x, y)
+    guard rawMagnitude > deadZone, deadZone < 1 else {
+      filtered = .zero
+      return .zero
+    }
+
+    let magnitude = min(rawMagnitude, 1)
+    let normalizedMagnitude = min(max((magnitude - deadZone) / (1 - deadZone), 0), 1)
+    let curveMagnitude = pow(normalizedMagnitude, max(responseExponent, 0.1))
+    let rampProgress = min(
+      normalizedMagnitude / Self.minimumOutputRampWidth,
+      1
+    )
+    let smoothRamp = rampProgress * rampProgress * (3 - 2 * rampProgress)
+    let minimumResponse = Self.minimumOutputMagnitude * smoothRamp
+    let shapedMagnitude = minimumResponse + (1 - minimumResponse) * curveMagnitude
+    let target = CGPoint(
+      x: x / rawMagnitude * shapedMagnitude,
+      y: y / rawMagnitude * shapedMagnitude
+    )
+    let elapsed = max(deltaTime, 0)
+    let timeConstant = max(responseTime, 0.000_1)
+    let retained = exp(-elapsed / timeConstant)
+    filtered = CGPoint(
+      x: target.x + (filtered.x - target.x) * retained,
+      y: target.y + (filtered.y - target.y) * retained
+    )
+    return filtered
+  }
+
+  mutating func reset() {
+    filtered = .zero
+  }
+}
+
+enum TimerGapPolicy {
+  static let emergencyThreshold: TimeInterval = 2.0
+
+  static func shouldEmergencyStop(
+    elapsed: TimeInterval,
+    hasActiveInput: Bool
+  ) -> Bool {
+    hasActiveInput && elapsed > emergencyThreshold
+  }
+
+  static func integrationDeltaTime(elapsed: TimeInterval) -> TimeInterval {
+    let safeElapsed = max(elapsed, 0)
+    return safeElapsed > ControlMath.maximumTimerGap ? 0 : safeElapsed
+  }
+}
+
+enum InputCadencePolicy {
+  static let minimumRate = 60.0
+  static let maximumRate = 240.0
+  static let defaultRate = 240.0
+  static let selectableRates = [60.0, 90.0, 120.0, 144.0, 240.0]
+
+  static func clampedRate(_ rate: Double) -> Double {
+    min(max(rate, minimumRate), maximumRate)
+  }
+
+  static func interval(for rate: Double) -> TimeInterval {
+    1.0 / clampedRate(rate)
+  }
+}
+
 enum ControlMath {
   static let maximumTimerGap: TimeInterval = 0.250
   static let safetyChordWindow: TimeInterval = 2.0
   static let stickDeadZone = 0.16
+  static let scrollStickDeadZone = 0.12
+  static let defaultStickResponseExponent = 1.05
+  static let defaultStickSmoothingTime: TimeInterval = 0.006
   static let stickPointerMaximumSpeed = 1_100.0
   static let stickPointerAbsoluteMaximumSpeed = 4_800.0
   static let stickAccelerationDelay = 0.25
@@ -35,6 +117,18 @@ enum ControlMath {
     let whole = Int32(remainder.rounded(.towardZero))
     remainder -= Double(whole)
     return whole
+  }
+
+  static func continuousScrollDelta(
+    axis: Double,
+    deadZone: Double,
+    gain: Double,
+    deltaTime: TimeInterval
+  ) -> Double {
+    let magnitude = abs(axis)
+    guard magnitude > deadZone, deadZone < 1 else { return 0 }
+    let normalized = (magnitude - deadZone) / (1 - deadZone) * (axis < 0 ? -1 : 1)
+    return -normalized * gain * (max(deltaTime, 0) / (1.0 / 60.0))
   }
 
   static func pointerDelta(
@@ -79,6 +173,30 @@ enum ControlMath {
     let magnitude = min(rawMagnitude, 1)
     let normalizedMagnitude = (magnitude - deadZone) / (1 - deadZone)
     let shapedMagnitude = pow(normalizedMagnitude, 1.65)
+    return integratedStickPointerDelta(
+      x: x / rawMagnitude * shapedMagnitude,
+      y: y / rawMagnitude * shapedMagnitude,
+      gain: gain,
+      maximumSpeed: maximumSpeed,
+      holdDuration: holdDuration,
+      accelerationDuration: accelerationDuration,
+      maximumBoost: maximumBoost,
+      deltaTime: deltaTime
+    )
+  }
+
+  static func integratedStickPointerDelta(
+    x: Double,
+    y: Double,
+    gain: Double,
+    maximumSpeed: Double,
+    holdDuration: TimeInterval,
+    accelerationDuration: TimeInterval,
+    maximumBoost: Double,
+    deltaTime: TimeInterval
+  ) -> CGPoint {
+    let magnitude = min(hypot(x, y), 1)
+    guard magnitude > 0 else { return .zero }
     let elapsed = min(max(deltaTime, 0), maximumTimerGap)
     let boost = stickHoldBoost(
       holdDuration: holdDuration,
@@ -90,10 +208,10 @@ enum ControlMath {
       maximumSpeed * max(gain, 0) * boost,
       stickPointerAbsoluteMaximumSpeed
     )
-    let distance = effectiveSpeed * shapedMagnitude * elapsed
+    let distance = effectiveSpeed * magnitude * elapsed
     return CGPoint(
-      x: x / rawMagnitude * distance,
-      y: y / rawMagnitude * distance
+      x: x / magnitude * distance,
+      y: y / magnitude * distance
     )
   }
 

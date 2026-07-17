@@ -4,14 +4,43 @@ import Combine
 import CoreAudio
 import CoreGraphics
 import Foundation
+import OSLog
 import Speech
+
+private enum MotionDiagnostic {
+  case rightStickY(Double)
+  case leftStick(x: Double, y: Double)
+  case triggers(left: Double, right: Double, multiplier: Double)
+  case touchDelta(x: Double, y: Double)
+
+  var label: String {
+    switch self {
+    case .rightStickY(let value):
+      return String(format: "右摇杆 Y  %.2f", value)
+    case .leftStick(let x, let y):
+      return hypot(x, y) > ControlMath.stickDeadZone
+        ? String(format: "左摇杆  %.2f, %.2f", x, y)
+        : "左摇杆居中"
+    case .triggers(let left, let right, let multiplier):
+      return String(
+        format: "L2 刹车 %.0f%% · R2 加速 %.0f%% · %.2f×",
+        left * 100,
+        right * 100,
+        multiplier
+      )
+    case .touchDelta(let x, let y):
+      return String(format: "触控板  Δ %.0f, %.0f", x, y)
+    }
+  }
+}
 
 @MainActor
 final class AppModel: ObservableObject {
-  private static let interfaceVoiceSource: Int32 = -1
+  private static let interfaceVoiceSource = UInt64.max
 
   @Published var controllerConnected = false
-  @Published var controllerName = "未连接 DualSense"
+  @Published var controllerName = "未连接手柄"
+  @Published var controllerFamily = ControllerFamily.generic
   @Published var connectionLabel = "—"
   @Published var microphoneButtonAvailable = false
   @Published var touchpadCount: Int32 = 0
@@ -36,10 +65,20 @@ final class AppModel: ObservableObject {
   @Published var scrollGain = 8.0 {
     didSet { UserDefaults.standard.set(scrollGain, forKey: "scrollGain") }
   }
-  @Published var inputPollingRate = 120.0 {
+  @Published var inputPollingRate = InputCadencePolicy.defaultRate {
     didSet {
       UserDefaults.standard.set(inputPollingRate, forKey: "inputPollingRate")
-      if started { installTimer() }
+      if started { startCadence() }
+    }
+  }
+  @Published var measuredInputRate = 0.0
+  @Published var inputCadenceLabel = "240 Hz 主动采样"
+  @Published var stickResponseExponent = ControlMath.defaultStickResponseExponent {
+    didSet { UserDefaults.standard.set(stickResponseExponent, forKey: "stickResponseExponent") }
+  }
+  @Published var stickSmoothingMilliseconds = ControlMath.defaultStickSmoothingTime * 1_000 {
+    didSet {
+      UserDefaults.standard.set(stickSmoothingMilliseconds, forKey: "stickSmoothingMilliseconds")
     }
   }
   @Published var stickAccelerationDuration = 1.6 {
@@ -85,37 +124,68 @@ final class AppModel: ObservableObject {
   @Published var activity: [String] = []
   @Published var audioDevices: [AudioInputDevice] = []
   @Published var selectedAudioDeviceID = AudioDeviceID(0)
+  @Published var isRecordingMapping = false
+  @Published var mappingCapturePrompt = ""
+  @Published var pendingMappingAction = ControllerAction.primaryClick
 
   private let voice = VoiceService()
   private let updateController = HelmUpdateController()
-  private var timer: Timer?
+  private let cadenceDriver = InputCadenceDriver()
+  private let permissionLogger = Logger(
+    subsystem: "io.github.tonycoder-hub.helm",
+    category: "permissions"
+  )
   private var terminationObserver: NSObjectProtocol?
   private var workspaceActivationObserver: NSObjectProtocol?
   private var started = false
   private var lastTick = ProcessInfo.processInfo.systemUptime
   private var nextPermissionRefresh = 0.0
   private var nextAudioRefresh = 0.0
-  private var leftStickX = 0.0
-  private var leftStickY = 0.0
+  private var nextDiagnosticsRefresh = 0.0
+  private var cadenceMeasurementStartedAt = 0.0
+  private var cadenceTickCount = 0
+  private var analogState = ControllerAnalogState()
   private var leftStickActiveSince: TimeInterval?
-  private var rightYAxis = 0.0
-  private var scrollRemainder = 0.0
+  private var scrollAccumulator = ContinuousScrollAccumulator()
+  private var pointerFilter = StickMotionFilter()
+  private var scrollFilter = StickMotionFilter()
   private var lastTouch: CGPoint?
   private var lastTouchTime: TimeInterval?
-  private var optionsPressedAt: TimeInterval?
   private var leftMouseDown = false
   private var rightMouseDown = false
-  private var leftMouseSources = Set<Int32>()
-  private var rightMouseSources = Set<Int32>()
-  private var pushToTalkSources = Set<Int32>()
+  private var leftMouseSources = Set<UInt64>()
+  private var rightMouseSources = Set<UInt64>()
+  private var pushToTalkSources = Set<UInt64>()
+  private var pendingLatestInput = "等待手柄连接"
+  private var pendingMotionDiagnostic: MotionDiagnostic?
   private var audioSelectionInitialized = false
+  private var audioRefreshGate = AudioRefreshGate()
+  private var activeVoiceAudioDevice: AudioInputDevice?
+  private var voiceFinalizing = false
   private var focusHistory = ExternalFocusHistory()
   private var voiceTestFinishing = false
   private var suppressAutoInsertForCurrentVoice = false
   private var voiceTestGeneration = VoiceTestSessionGeneration()
   private var activeVoiceTestToken: UInt64?
+  private var voiceDeliveryGeneration = VoiceTestSessionGeneration()
+  private var activeVoiceDeliveryToken: UInt64?
+  private var voiceInsertionTarget: Int32?
+  private var voiceInsertionProcessIdentity: ExternalProcessIdentity?
+  private var lastCompletedTranscript: String?
+  private var manualDeliveryActivationBaseline: UInt64?
   private let hapticBackend = SDLHapticBackend()
   private var hapticCoordinator = HapticCoordinator(minimumInterval: 0.055)
+  private var bindingResolver = ControllerBindingResolver()
+  private var modifierHoldCoordinator = ModifierHoldCoordinator()
+  private var chordRecorder = ControllerChordRecorder()
+  private var safetyChordTracker = SafetyChordTracker()
+  private var mappingCaptureOriginalChord: ControllerChord?
+  private var controllerIdentity: ControllerIdentity?
+  private var controllerConnection = ControllerConnection.unknown
+  private var pendingReconnectIdentity: ControllerIdentity?
+  private var pendingReconnectWorkItem: DispatchWorkItem?
+  private var latencyActivity: NSObjectProtocol?
+  private var permissionDiagnosticTracker = PermissionDiagnosticTracker()
 
   init() {
     let defaults = UserDefaults.standard
@@ -126,7 +196,13 @@ final class AppModel: ObservableObject {
       scrollGain = min(max(value, 2), 18)
     }
     if let value = defaults.object(forKey: "inputPollingRate") as? Double {
-      inputPollingRate = min(max(value, 60), 240)
+      inputPollingRate = InputCadencePolicy.clampedRate(value)
+    }
+    if let value = defaults.object(forKey: "stickResponseExponent") as? Double {
+      stickResponseExponent = min(max(value, 0.7), 2.4)
+    }
+    if let value = defaults.object(forKey: "stickSmoothingMilliseconds") as? Double {
+      stickSmoothingMilliseconds = min(max(value, 0), 60)
     }
     if let value = defaults.object(forKey: "stickAccelerationDuration") as? Double {
       stickAccelerationDuration = min(max(value, 0.4), 3.5)
@@ -179,15 +255,15 @@ final class AppModel: ObservableObject {
 
   var currentRacingSpeedMultiplier: Double {
     ControlMath.racingSpeedMultiplier(
-      brake: leftTriggerValue,
-      accelerator: rightTriggerValue,
+      brake: analogState.leftTrigger,
+      accelerator: analogState.rightTrigger,
       minimumSpeed: brakeMinimumSpeed,
       maximumSpeed: acceleratorMaximumSpeed
     )
   }
 
   var hapticCapabilityLabel: String {
-    guard controllerConnected else { return "等待连接 DualSense" }
+    guard controllerConnected else { return "等待连接手柄" }
     return hapticsAvailable ? "SDL 已报告整机震动能力" : "当前连接未报告震动能力"
   }
 
@@ -235,7 +311,7 @@ final class AppModel: ObservableObject {
       appendActivity("SDL3 3.4.12 事件层已启动")
     }
 
-    installTimer()
+    startCadence()
 
     terminationObserver = NotificationCenter.default.addObserver(
       forName: NSApplication.willTerminateNotification,
@@ -290,7 +366,9 @@ final class AppModel: ObservableObject {
     }
     controlsEnabled = true
     resetMotionState()
-    setStatus("控制已启用。Options + 触控板可随时紧急停止。", log: true)
+    InputInjector.beginPointerSession()
+    updateLatencyActivity()
+    setStatus("控制已启用。固定安全组合键可随时紧急停止。", log: true)
     playHaptic(.controlEnabled)
   }
 
@@ -368,6 +446,48 @@ final class AppModel: ObservableObject {
 
   func clearTranscript() {
     transcript = ""
+    lastCompletedTranscript = nil
+    manualDeliveryActivationBaseline = nil
+  }
+
+  var canRetryExternalTextDelivery: Bool {
+    VoiceManualDeliveryPolicy.deliverableText(
+      lastCompletedTranscript,
+      isListening: isListening,
+      isFinalizing: voiceFinalizing,
+      deliveryInProgress: activeVoiceDeliveryToken != nil
+    ) != nil
+  }
+
+  func retryExternalTextDelivery() {
+    guard
+      let text = VoiceManualDeliveryPolicy.deliverableText(
+        lastCompletedTranscript,
+        isListening: isListening,
+        isFinalizing: voiceFinalizing,
+        deliveryInProgress: activeVoiceDeliveryToken != nil
+      )
+    else {
+      setStatus("当前没有已完成且可重新发送的识别文本。", log: true)
+      return
+    }
+
+    guard
+      let activationBaseline = manualDeliveryActivationBaseline,
+      let targetIdentity = focusHistory.manualRetryTarget(after: activationBaseline)
+    else {
+      setStatus("请在识别完成后重新聚焦外部文本框，再返回 Helm 发送。", log: true)
+      return
+    }
+
+    invalidateVoiceTextDelivery()
+    manualDeliveryActivationBaseline = focusHistory.activationGeneration
+    voiceInsertionTarget = targetIdentity.processIdentifier
+    voiceInsertionProcessIdentity = targetIdentity
+    let token = voiceDeliveryGeneration.begin()
+    activeVoiceDeliveryToken = token
+    setStatus("正在把已识别文本重新发送到上一个外部焦点…", log: true)
+    deliverRecognizedText(text, token: token, attemptsRemaining: 12)
   }
 
   func testHaptics() {
@@ -405,6 +525,58 @@ final class AppModel: ObservableObject {
     setStatus("已恢复默认按键映射与快捷键。", log: true)
   }
 
+  var safetyChordLabel: String {
+    if controllerFamily == .playStation { return "Options + 触控板" }
+    return "\(ControllerPresentation.label(for: .start, family: controllerFamily)) + \(ControllerPresentation.label(for: .back, family: controllerFamily))"
+  }
+
+  var controllerSystemImage: String {
+    switch controllerFamily {
+    case .playStation: return "playstation.logo"
+    case .xbox: return "xbox.logo"
+    case .nintendo, .generic: return "gamecontroller.fill"
+    }
+  }
+
+  func setMappingAction(_ action: ControllerAction, for chord: ControllerChord) {
+    var updated = mapping
+    _ = updated.upsert(ControllerBinding(chord: chord, action: action))
+    mapping = updated
+  }
+
+  func removeMapping(_ chord: ControllerChord) {
+    var updated = mapping
+    updated.remove(chord: chord)
+    mapping = updated
+  }
+
+  func beginMappingCapture(replacing chord: ControllerChord? = nil) {
+    guard !isRecordingMapping else { return }
+    let voiceActive = isListening || voiceFinalizing || !pushToTalkSources.isEmpty
+    let plan = MappingCapturePolicy.begin(
+      controlsEnabled: controlsEnabled,
+      voiceActive: voiceActive,
+      injectedInputActive: leftMouseDown || rightMouseDown
+        || !leftMouseSources.isEmpty || !rightMouseSources.isEmpty
+    )
+    if plan.shouldStopVoice { stopVoiceForMappingCapture() }
+    if plan.shouldReleaseInjectedInputs { releaseInjectedInputsPreservingControlSession() }
+    controlsEnabled = plan.controlsEnabledAfterTransition
+    mappingCaptureOriginalChord = chord
+    chordRecorder.begin()
+    isRecordingMapping = true
+    mappingCapturePrompt = chord == nil
+      ? "请按住 1–4 个手柄键，再松开全部按键"
+      : "请录入替代 \(chord!.label(family: controllerFamily)) 的新按键或组合键"
+    setStatus("映射录入已开始；控制连接保持，录入期间暂不注入桌面动作。", log: true)
+  }
+
+  func cancelMappingCapture() {
+    guard isRecordingMapping else { return }
+    cancelMappingCaptureState()
+    setStatus("已取消按键映射录入。", log: true)
+  }
+
   func openAccessibilitySettings() {
     InputInjector.openAccessibilitySettings()
   }
@@ -414,8 +586,7 @@ final class AppModel: ObservableObject {
   }
 
   func shutdown() {
-    timer?.invalidate()
-    timer = nil
+    cadenceDriver.stop()
     emergencyStop(reason: "应用退出")
     HelmSDLStop()
     if let terminationObserver {
@@ -428,22 +599,18 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func installTimer() {
-    timer?.invalidate()
-    let rate = min(max(inputPollingRate, 60), 240)
-    let interval = 1.0 / rate
+  private func startCadence() {
+    measuredInputRate = 0
     lastTick = ProcessInfo.processInfo.systemUptime
     nextPermissionRefresh = lastTick + 1
     nextAudioRefresh = lastTick + 3
-    let newTimer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-      MainActor.assumeIsolated {
-        self?.tick()
-      }
+    nextDiagnosticsRefresh = lastTick
+    cadenceMeasurementStartedAt = lastTick
+    cadenceTickCount = 0
+    inputCadenceLabel = cadenceDriver.start(rate: inputPollingRate) { [weak self] in
+      self?.tick()
     }
-    newTimer.tolerance = min(interval * 0.05, 0.001)
-    timer = newTimer
-    RunLoop.main.add(newTimer, forMode: .common)
-    appendActivity("输入轮询率：" + String(Int(rate)) + " Hz")
+    appendActivity("输入节拍：\(inputCadenceLabel)")
   }
 
   private func requestSpeechPermissionIfNeeded() {
@@ -460,17 +627,24 @@ final class AppModel: ObservableObject {
     let now = ProcessInfo.processInfo.systemUptime
     let elapsed = now - lastTick
     lastTick = now
-
-    if let optionsPressedAt, now - optionsPressedAt > ControlMath.safetyChordWindow {
-      self.optionsPressedAt = nil
+    cadenceTickCount += 1
+    let cadenceElapsed = now - cadenceMeasurementStartedAt
+    if cadenceElapsed >= 1 {
+      let roundedRate = Double(Int((Double(cadenceTickCount) / cadenceElapsed).rounded()))
+      if measuredInputRate != roundedRate { measuredInputRate = roundedRate }
+      cadenceMeasurementStartedAt = now
+      cadenceTickCount = 0
     }
 
-    if elapsed > ControlMath.maximumTimerGap {
-      if controlsEnabled || isListening || leftMouseDown || rightMouseDown {
-        emergencyStop(reason: "检测到睡眠/长定时器间隔")
-      } else {
-        resetMotionState()
-      }
+    let hasActiveInput = controlsEnabled || isListening || voiceFinalizing
+      || leftMouseDown || rightMouseDown || !pushToTalkSources.isEmpty
+    if TimerGapPolicy.shouldEmergencyStop(
+      elapsed: elapsed,
+      hasActiveInput: hasActiveInput
+    ) {
+      emergencyStop(reason: "检测到系统睡眠/超长定时器间隔")
+    } else if elapsed > ControlMath.maximumTimerGap {
+      resetMotionIntegrationState()
     }
 
     var processed = 0
@@ -481,24 +655,56 @@ final class AppModel: ObservableObject {
       event = HelmSDLEvent()
     }
 
-    if controlsEnabled, accessibilityGranted {
-      let stickMagnitude = hypot(leftStickX, leftStickY)
-      if stickMagnitude > ControlMath.stickDeadZone {
+    var analog = HelmSDLAnalogState()
+    if controllerConnected, HelmSDLReadAnalogState(&analog) {
+      analogState.applyPolledSample(
+        ControllerAnalogSample(
+          leftX: Double(analog.left_x),
+          leftY: Double(analog.left_y),
+          rightY: Double(analog.right_y),
+          leftTrigger: Double(analog.left_trigger),
+          rightTrigger: Double(analog.right_trigger)
+        )
+      )
+      if hypot(analogState.leftX, analogState.leftY) > ControlMath.stickDeadZone {
+        pendingMotionDiagnostic = .leftStick(x: analogState.leftX, y: analogState.leftY)
+      } else if abs(analogState.rightY) > ControlMath.scrollStickDeadZone {
+        pendingMotionDiagnostic = .rightStickY(analogState.rightY)
+      } else if analogState.leftTrigger > 0.01 || analogState.rightTrigger > 0.01 {
+        pendingMotionDiagnostic = .triggers(
+          left: analogState.leftTrigger,
+          right: analogState.rightTrigger,
+          multiplier: currentRacingSpeedMultiplier
+        )
+      }
+    }
+
+    if controllerConnected, controlsEnabled, accessibilityGranted, !isRecordingMapping {
+      let safeElapsed = TimerGapPolicy.integrationDeltaTime(elapsed: elapsed)
+      let pointerVector = pointerFilter.update(
+        x: analogState.leftX,
+        y: analogState.leftY,
+        deadZone: ControlMath.stickDeadZone,
+        responseExponent: stickResponseExponent,
+        responseTime: stickSmoothingMilliseconds / 1_000,
+        deltaTime: safeElapsed
+      )
+      let stickMagnitude = hypot(pointerVector.x, pointerVector.y)
+      if stickMagnitude > 0 {
         if leftStickActiveSince == nil { leftStickActiveSince = now }
       } else {
         leftStickActiveSince = nil
       }
       let holdDuration = leftStickActiveSince.map { max(now - $0, 0) } ?? 0
-      let pointer = ControlMath.stickPointerDelta(
-        x: leftStickX,
-        y: leftStickY,
-        deadZone: ControlMath.stickDeadZone,
+      let pointer = ControlMath.integratedStickPointerDelta(
+        x: pointerVector.x,
+        y: pointerVector.y,
         gain: pointerGain * currentRacingSpeedMultiplier,
         maximumSpeed: ControlMath.stickPointerMaximumSpeed,
         holdDuration: holdDuration,
         accelerationDuration: stickAccelerationDuration,
         maximumBoost: stickMaximumBoost,
-        deltaTime: min(elapsed, ControlMath.maximumTimerGap)
+        deltaTime: safeElapsed
       )
       if pointer != .zero {
         InputInjector.movePointer(
@@ -509,86 +715,95 @@ final class AppModel: ObservableObject {
         )
       }
 
-      let scroll = ControlMath.scrollDelta(
-        axis: rightYAxis,
-        deadZone: 0.18,
-        gain: scrollGain * currentRacingSpeedMultiplier,
-        deltaTime: min(elapsed, ControlMath.maximumTimerGap),
-        remainder: &scrollRemainder
+      let scrollVector = scrollFilter.update(
+        x: 0,
+        y: analogState.rightY,
+        deadZone: ControlMath.scrollStickDeadZone,
+        responseExponent: stickResponseExponent,
+        responseTime: stickSmoothingMilliseconds / 1_000,
+        deltaTime: safeElapsed
       )
-      if scroll != 0 { InputInjector.scroll(pixels: scroll) }
+      let scroll = ControlMath.continuousScrollDelta(
+        axis: scrollVector.y,
+        deadZone: 0,
+        gain: scrollGain * currentRacingSpeedMultiplier,
+        deltaTime: safeElapsed
+      )
+      let scrollSample = scrollAccumulator.update(precisePixels: scroll)
+      if scrollSample != .zero { InputInjector.scroll(sample: scrollSample) }
+    }
+
+    if now >= nextDiagnosticsRefresh {
+      if let pendingMotionDiagnostic {
+        pendingLatestInput = pendingMotionDiagnostic.label
+        self.pendingMotionDiagnostic = nil
+      }
+      if latestInput != pendingLatestInput { latestInput = pendingLatestInput }
+      if abs(leftTriggerValue - analogState.leftTrigger) >= 0.01 {
+        leftTriggerValue = analogState.leftTrigger
+      }
+      if abs(rightTriggerValue - analogState.rightTrigger) >= 0.01 {
+        rightTriggerValue = analogState.rightTrigger
+      }
+      nextDiagnosticsRefresh = now + 1.0 / 15.0
     }
 
     if now >= nextPermissionRefresh {
       refreshPermissionState()
-      microphoneButtonAvailable = controllerConnected && HelmSDLHasMicrophoneButton()
-      touchpadCount = controllerConnected ? HelmSDLTouchpadCount() : 0
-      hapticsAvailable = controllerConnected && hapticBackend.isAvailable()
+      let hasMicrophoneButton = controllerConnected && HelmSDLHasMicrophoneButton()
+      if microphoneButtonAvailable != hasMicrophoneButton {
+        microphoneButtonAvailable = hasMicrophoneButton
+      }
+      let detectedTouchpadCount = controllerConnected ? HelmSDLTouchpadCount() : 0
+      if touchpadCount != detectedTouchpadCount { touchpadCount = detectedTouchpadCount }
+      let detectedHaptics = controllerConnected && hapticBackend.isAvailable()
+      if hapticsAvailable != detectedHaptics { hapticsAvailable = detectedHaptics }
       nextPermissionRefresh = now + 1
     }
     if now >= nextAudioRefresh {
       refreshAudioDevices()
       nextAudioRefresh = now + 3
     }
+    updateLatencyActivity()
   }
 
   private func handle(_ sourceEvent: HelmSDLEvent, now: TimeInterval) {
     var event = sourceEvent
     switch event.kind {
     case Int32(HELM_SDL_EVENT_CONNECTED):
-      controllerConnected = true
-      controllerName = bridgeString(&event)
-      connectionLabel = connectionName(HelmSDLConnectionState())
-      microphoneButtonAvailable = HelmSDLHasMicrophoneButton()
-      touchpadCount = HelmSDLTouchpadCount()
-      hapticsAvailable = hapticBackend.isAvailable()
-      emergencyStop(reason: "手柄已连接，等待显式启用", announce: false)
-      latestInput = "已连接 \(controllerName)"
-      setStatus("检测到 \(controllerName)，请检查权限后启用控制。", log: true)
+      handleControllerConnected(event: &event)
 
     case Int32(HELM_SDL_EVENT_DISCONNECTED):
-      emergencyStop(reason: "手柄已断开")
-      controllerConnected = false
-      controllerName = "未连接 DualSense"
-      connectionLabel = "—"
-      microphoneButtonAvailable = false
-      touchpadCount = 0
-      hapticsAvailable = false
-      latestInput = "手柄已断开"
+      handleControllerDisconnected(event: event)
 
     case Int32(HELM_SDL_EVENT_BUTTON):
       handleButton(event.button, pressed: event.pressed != 0, now: now)
 
     case Int32(HELM_SDL_EVENT_RIGHT_Y):
-      rightYAxis = Double(event.value)
-      if abs(rightYAxis) > 0.18 {
-        latestInput = String(format: "右摇杆 Y  %.2f", rightYAxis)
+      analogState.rightY = Double(event.value)
+      if abs(analogState.rightY) > ControlMath.scrollStickDeadZone {
+        pendingMotionDiagnostic = .rightStickY(analogState.rightY)
       }
 
     case Int32(HELM_SDL_EVENT_LEFT_STICK):
-      leftStickX = Double(event.x)
-      leftStickY = Double(event.y)
-      if hypot(leftStickX, leftStickY) > ControlMath.stickDeadZone {
-        latestInput = String(format: "左摇杆  %.2f, %.2f", leftStickX, leftStickY)
-      } else {
-        latestInput = "左摇杆居中"
-      }
+      analogState.leftX = Double(event.x)
+      analogState.leftY = Double(event.y)
+      pendingMotionDiagnostic = .leftStick(x: analogState.leftX, y: analogState.leftY)
 
     case Int32(HELM_SDL_EVENT_TRIGGERS):
-      leftTriggerValue = min(max(Double(event.x), 0), 1)
-      rightTriggerValue = min(max(Double(event.y), 0), 1)
-      latestInput = String(
-        format: "L2 刹车 %.0f%% · R2 加速 %.0f%% · %.2f×",
-        leftTriggerValue * 100,
-        rightTriggerValue * 100,
-        currentRacingSpeedMultiplier
+      analogState.leftTrigger = min(max(Double(event.x), 0), 1)
+      analogState.rightTrigger = min(max(Double(event.y), 0), 1)
+      pendingMotionDiagnostic = .triggers(
+        left: analogState.leftTrigger,
+        right: analogState.rightTrigger,
+        multiplier: currentRacingSpeedMultiplier
       )
 
     case Int32(HELM_SDL_EVENT_TOUCH_DOWN):
       if event.finger == 0 {
         lastTouch = CGPoint(x: Double(event.x), y: Double(event.y))
         lastTouchTime = now
-        latestInput = "触控板按下"
+        queueLatestInput("触控板按下")
       }
 
     case Int32(HELM_SDL_EVENT_TOUCH_MOVE):
@@ -598,7 +813,7 @@ final class AppModel: ObservableObject {
       if event.finger == 0 {
         lastTouch = nil
         lastTouchTime = nil
-        latestInput = "触控板抬起"
+        queueLatestInput("触控板抬起")
       }
 
     case Int32(HELM_SDL_EVENT_ERROR):
@@ -610,55 +825,59 @@ final class AppModel: ObservableObject {
   }
 
   private func handleButton(_ button: Int32, pressed: Bool, now: TimeInterval) {
-    let state = pressed ? "按下" : "抬起"
-    switch button {
-    case Int32(HELM_BUTTON_OPTIONS):
-      optionsPressedAt = pressed ? now : nil
-      latestInput = "Options \(state)"
+    guard let controllerButton = ControllerButton(rawValue: button) else { return }
+    let buttonLabel = ControllerPresentation.label(for: controllerButton, family: controllerFamily)
+    queueLatestInput("\(buttonLabel) \(pressed ? "按下" : "抬起")")
 
-    case Int32(HELM_BUTTON_TOUCHPAD):
-      latestInput = "触控板键 \(state)"
-      if pressed,
-        ControlMath.safetyChordIsValid(
-          modifierPressedAt: optionsPressedAt,
-          buttonPressedAt: now
-        )
-      {
-        toggleControls(promptForAccessibility: false)
-        optionsPressedAt = nil
+    if isRecordingMapping {
+      mappingCapturePrompt = pressed ? "已按下 \(buttonLabel)，松开全部按键完成" : "正在等待全部按键松开"
+      if let chord = chordRecorder.process(button: controllerButton, pressed: pressed) {
+        completeMappingCapture(with: chord)
       }
+      return
+    }
 
-    case Int32(HELM_BUTTON_CROSS):
-      handleMappedButton(button, label: "Cross", action: mapping.cross, pressed: pressed)
+    if safetyChordTracker.process(
+      button: controllerButton,
+      pressed: pressed,
+      family: controllerFamily,
+      now: now
+    ) {
+      if controlsEnabled || isListening || voiceFinalizing || leftMouseDown || rightMouseDown
+        || !pushToTalkSources.isEmpty
+      {
+        emergencyStop(reason: "固定安全组合键")
+      } else {
+        setStatus("控制已经处于安全停用状态。", log: true)
+      }
+      return
+    }
 
-    case Int32(HELM_BUTTON_CIRCLE):
-      handleMappedButton(button, label: "Circle", action: mapping.circle, pressed: pressed)
-
-    case Int32(HELM_BUTTON_CREATE):
-      handleMappedButton(button, label: "Create", action: mapping.create, pressed: pressed)
-
-    case Int32(HELM_BUTTON_MICROPHONE):
-      handleMappedButton(button, label: "麦克风键", action: mapping.microphone, pressed: pressed)
-
-    case Int32(HELM_BUTTON_DPAD_UP):
-      handleMappedButton(button, label: "D-pad 上", action: mapping.dpadUp, pressed: pressed)
-
-    case Int32(HELM_BUTTON_DPAD_DOWN):
-      handleMappedButton(button, label: "D-pad 下", action: mapping.dpadDown, pressed: pressed)
-
-    default:
-      break
+    let transitions = bindingResolver.process(
+      button: controllerButton,
+      pressed: pressed,
+      mapping: mapping
+    )
+    for transition in transitions {
+      handleMappedButton(
+        transition.chord.sourceID,
+        label: transition.chord.label(family: controllerFamily),
+        action: transition.action,
+        pressed: transition.pressed
+      )
     }
   }
 
   private func handleMappedButton(
-    _ source: Int32,
+    _ source: UInt64,
     label: String,
     action: ControllerAction,
     pressed: Bool
   ) {
-    latestInput = "\(label) \(pressed ? "按下" : "抬起") → \(action.title)"
-    guard controlsEnabled else { return }
+    queueLatestInput("\(label) \(pressed ? "按下" : "抬起") → \(action.title)")
+    if action.requiresDesktopControls {
+      guard controlsEnabled else { return }
+    }
 
     switch action {
     case .none:
@@ -692,6 +911,7 @@ final class AppModel: ObservableObject {
         playHaptic(.navigation)
       }
     case .pushToTalk:
+      guard controllerConnected else { return }
       updatePushToTalkSource(
         source,
         pressed: pressed,
@@ -699,21 +919,81 @@ final class AppModel: ObservableObject {
         label: label
       )
     case .shortcut1:
-      if pressed { performShortcut(shortcutSettings.slot1, source: label) }
+      performShortcut(
+        .shortcut1,
+        shortcut: shortcutSettings.slot1,
+        sourceID: source,
+        sourceLabel: label,
+        pressed: pressed
+      )
     case .shortcut2:
-      if pressed { performShortcut(shortcutSettings.slot2, source: label) }
+      performShortcut(
+        .shortcut2,
+        shortcut: shortcutSettings.slot2,
+        sourceID: source,
+        sourceLabel: label,
+        pressed: pressed
+      )
     case .shortcut3:
-      if pressed { performShortcut(shortcutSettings.slot3, source: label) }
+      performShortcut(
+        .shortcut3,
+        shortcut: shortcutSettings.slot3,
+        sourceID: source,
+        sourceLabel: label,
+        pressed: pressed
+      )
     }
   }
 
-  private func performShortcut(_ shortcut: KeyboardShortcutDefinition, source: String) {
+  private func performShortcut(
+    _ action: ControllerAction,
+    shortcut: KeyboardShortcutDefinition,
+    sourceID: UInt64,
+    sourceLabel: String,
+    pressed: Bool
+  ) {
+    if shortcut.isModifierOnly {
+      let slot: Int
+      switch action {
+      case .shortcut1: slot = 1
+      case .shortcut2: slot = 2
+      case .shortcut3: slot = 3
+      default: return
+      }
+      var nextCoordinator = modifierHoldCoordinator
+      let transitions = nextCoordinator.update(
+        slot: slot,
+        source: sourceID,
+        modifierCodes: shortcut.modifierVirtualKeyCodes,
+        pressed: pressed
+      )
+      if transitions.isEmpty {
+        modifierHoldCoordinator = nextCoordinator
+        return
+      }
+      if InputInjector.applyModifierKeyTransitions(transitions) {
+        modifierHoldCoordinator = nextCoordinator
+        if pressed {
+          setStatus("正在按住 \(shortcut.label)（\(sourceLabel)）。", log: true)
+          playHaptic(.shortcut)
+        }
+      } else {
+        setStatus("修饰键被安全输入阻止或发送失败。", log: true)
+      }
+      return
+    }
+
+    guard pressed else { return }
+    guard shortcut.key != nil else {
+      setStatus("快捷键未设置：请选择一个按键或至少一个修饰键。", log: true)
+      return
+    }
     guard accessibilityGranted else {
       setStatus("快捷键需要辅助功能权限。", log: true)
       return
     }
     if InputInjector.sendShortcut(shortcut) {
-      setStatus("已发送快捷键 \(shortcut.label)（\(source)）。", log: true)
+      setStatus("已发送快捷键 \(shortcut.label)（\(sourceLabel)）。", log: true)
       playHaptic(.shortcut)
     } else {
       setStatus("快捷键被安全输入阻止或发送失败。", log: true)
@@ -721,7 +1001,7 @@ final class AppModel: ObservableObject {
   }
 
   private func updatePushToTalkSource(
-    _ source: Int32,
+    _ source: UInt64,
     pressed: Bool,
     commitOnRelease: Bool,
     label: String
@@ -767,12 +1047,17 @@ final class AppModel: ObservableObject {
       leftButtonDown: leftMouseDown,
       rightButtonDown: rightMouseDown
     )
-    latestInput = String(format: "触控板  Δ %.0f, %.0f", delta.x, delta.y)
+    pendingMotionDiagnostic = .touchDelta(x: delta.x, y: delta.y)
   }
 
   private func beginVoice(source: String) {
     guard !isListening else { return }
     refreshPermissionState()
+    guard
+      VoiceSessionPolicy.canBeginAfterEnvironmentRefresh(
+        hasPressOwner: !pushToTalkSources.isEmpty
+      )
+    else { return }
     guard voicePermissionsGranted else {
       setStatus("请先授予麦克风和语音识别权限。", log: true)
       return
@@ -789,6 +1074,22 @@ final class AppModel: ObservableObject {
     }
 
     suppressAutoInsertForCurrentVoice = false
+    voiceFinalizing = false
+    lastCompletedTranscript = nil
+    manualDeliveryActivationBaseline = nil
+    voiceInsertionProcessIdentity = nil
+    let helmProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+    let currentProcessIdentifier =
+      NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+    voiceInsertionTarget = focusHistory.insertionTarget(
+      currentProcessIdentifier: currentProcessIdentifier,
+      helmProcessIdentifier: helmProcessIdentifier
+    )
+    activeVoiceDeliveryToken = voiceDeliveryGeneration.begin()
+    defer {
+      lastTick = ProcessInfo.processInfo.systemUptime
+      resetMotionIntegrationState()
+    }
     do {
       let sampleRate = try voice.start(
         deviceID: selectedAudioDeviceID,
@@ -801,15 +1102,21 @@ final class AppModel: ObservableObject {
         }
       )
       lastAudioSampleRate = sampleRate
+      activeVoiceAudioDevice = selectedDevice
       transcript = "正在聆听…"
       isListening = true
+      updateLatencyActivity()
       setStatus(
         "PTT 已开始（\(source) · \(selectedAudioDeviceName) · \(Int(sampleRate)) Hz）",
         log: true
       )
       playHaptic(.voiceStart)
     } catch {
+      activeVoiceAudioDevice = nil
       isListening = false
+      voiceFinalizing = false
+      invalidateVoiceTextDelivery()
+      updateLatencyActivity()
       setStatus("无法开始语音输入：\(error.localizedDescription)", log: true)
     }
   }
@@ -817,6 +1124,8 @@ final class AppModel: ObservableObject {
   private func endVoice(commit: Bool, source: String) {
     guard isListening else { return }
     isListening = false
+    voiceFinalizing = commit
+    updateLatencyActivity()
     setStatus(commit ? "PTT 已释放，正在完成识别…" : "PTT 已停止（\(source)）", log: true)
     playHaptic(.voiceStop)
     voice.stop(commit: commit)
@@ -824,32 +1133,136 @@ final class AppModel: ObservableObject {
 
   private func voiceCompleted(text: String?, error: String?) {
     isListening = false
+    voiceFinalizing = false
+    activeVoiceAudioDevice = nil
+    updateLatencyActivity()
+    let deliveryToken = activeVoiceDeliveryToken
     let insertionSuppressed = suppressAutoInsertForCurrentVoice
     suppressAutoInsertForCurrentVoice = false
     if let text, !text.isEmpty {
       transcript = text
+      lastCompletedTranscript = text
+      manualDeliveryActivationBaseline = focusHistory.activationGeneration
       if insertionSuppressed {
+        invalidateVoiceTextDelivery()
         setStatus("未能确认外部文本焦点；识别文本只保留在 Helm 中。", log: true)
       } else if autoInsert {
-        switch InputInjector.insertAtFocusedTextElement(text) {
-        case .inserted(let method):
-          setStatus("识别文本已写入当前文本框（\(method)）。", log: true)
-        case .dispatched(let method):
-          setStatus("已向当前焦点发送\(method)；目标应用可能拒绝，请确认文本是否出现。", log: true)
-        case .refused(let reason):
-          setStatus("\(reason)；文本保留在 Helm 中。", log: true)
+        if let deliveryToken {
+          deliverRecognizedText(text, token: deliveryToken, attemptsRemaining: 12)
+        } else {
+          setStatus("语音目标会话已失效；文本保留在 Helm 中。", log: true)
         }
       } else {
+        invalidateVoiceTextDelivery()
         setStatus("语音识别完成，自动写入已关闭。", log: true)
       }
     } else if let error, !error.isEmpty {
+      invalidateVoiceTextDelivery()
       setStatus("语音识别结束：\(error)", log: true)
     } else {
+      invalidateVoiceTextDelivery()
       setStatus("没有识别到可用文本。", log: true)
+    }
+    nextAudioRefresh = 0
+  }
+
+  private func deliverRecognizedText(
+    _ text: String,
+    token: UInt64,
+    attemptsRemaining: Int
+  ) {
+    guard activeVoiceDeliveryToken == token, voiceDeliveryGeneration.accepts(token) else { return }
+    let helmProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+    let currentProcessIdentifier =
+      NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+    let target = VoiceInsertionTargetPolicy.deliveryTarget(
+      capturedProcessIdentifier: voiceInsertionTarget,
+      currentProcessIdentifier: currentProcessIdentifier,
+      helmProcessIdentifier: helmProcessIdentifier
+    )
+
+    guard let target, target > 0, target != helmProcessIdentifier else {
+      invalidateVoiceTextDelivery()
+      setStatus("未找到外部文本目标；识别文本只保留在 Helm 中。", log: true)
+      return
+    }
+
+    if let expectedIdentity = voiceInsertionProcessIdentity,
+      !runningApplicationMatches(expectedIdentity)
+    {
+      invalidateVoiceTextDelivery()
+      setStatus("外部目标进程已经更换；为避免误写，文本保留在 Helm 中。", log: true)
+      return
+    }
+
+    if currentProcessIdentifier != target {
+      guard let nextAttemptCount = VoiceTextDeliveryRetryPolicy.nextAttemptCount(
+        from: attemptsRemaining
+      ),
+        let application = NSRunningApplication(processIdentifier: target),
+        !application.isTerminated
+      else {
+        invalidateVoiceTextDelivery()
+        setStatus("外部目标应用未能恢复焦点；识别文本只保留在 Helm 中。", log: true)
+        return
+      }
+      _ = application.activate(options: [.activateAllWindows])
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+        self?.deliverRecognizedText(
+          text,
+          token: token,
+          attemptsRemaining: nextAttemptCount
+        )
+      }
+      return
+    }
+
+    let result = InputInjector.insertAtFocusedTextElement(
+      text,
+      expectedProcessIdentifier: target
+    )
+    switch result {
+    case .inserted(let method):
+      invalidateVoiceTextDelivery()
+      setStatus("识别文本已写入外部文本框（\(method)）。", log: true)
+    case .dispatched(let method):
+      invalidateVoiceTextDelivery()
+      setStatus("已向外部焦点发送\(method)；请确认文本是否出现。", log: true)
+    case .retryable(let reason):
+      guard let nextAttemptCount = VoiceTextDeliveryRetryPolicy.nextAttemptCount(
+        from: attemptsRemaining
+      ) else {
+        invalidateVoiceTextDelivery()
+        setStatus("\(reason)；重试已用尽，文本保留在 Helm 中。", log: true)
+        return
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+        self?.deliverRecognizedText(
+          text,
+          token: token,
+          attemptsRemaining: nextAttemptCount
+        )
+      }
+    case .refused(let reason):
+      invalidateVoiceTextDelivery()
+      setStatus("\(reason)；文本保留在 Helm 中。", log: true)
+    }
+  }
+
+  private func invalidateVoiceTextDelivery() {
+    voiceDeliveryGeneration.invalidate()
+    activeVoiceDeliveryToken = nil
+    voiceInsertionTarget = nil
+    voiceInsertionProcessIdentity = nil
+    if lastCompletedTranscript != nil {
+      manualDeliveryActivationBaseline = focusHistory.activationGeneration
     }
   }
 
   private func emergencyStop(reason: String, announce: Bool = true) {
+    pendingReconnectWorkItem?.cancel()
+    pendingReconnectWorkItem = nil
+    pendingReconnectIdentity = nil
     if leftMouseDown {
       InputInjector.mouseButton(.left, pressed: false)
       leftMouseDown = false
@@ -860,28 +1273,296 @@ final class AppModel: ObservableObject {
     }
     leftMouseSources.removeAll()
     rightMouseSources.removeAll()
+    releaseHeldShortcutModifiers()
     pushToTalkSources.removeAll()
+    _ = bindingResolver.reset()
+    cancelMappingCaptureState(resumeControls: false)
     voice.cancelCurrent()
+    activeVoiceAudioDevice = nil
     hapticCoordinator.stop(backend: hapticBackend)
     isListening = false
+    voiceFinalizing = false
     invalidateVoiceTestSession()
+    invalidateVoiceTextDelivery()
     suppressAutoInsertForCurrentVoice = false
     controlsEnabled = false
-    optionsPressedAt = nil
+    safetyChordTracker.reset()
+    InputInjector.endPointerSession()
     resetMotionState()
+    updateLatencyActivity()
     if announce { setStatus("控制已安全停用：\(reason)", log: true) }
   }
 
   private func resetMotionState() {
-    leftStickX = 0
-    leftStickY = 0
-    leftStickActiveSince = nil
-    rightYAxis = 0
+    analogState.reset()
     leftTriggerValue = 0
     rightTriggerValue = 0
-    scrollRemainder = 0
+    resetMotionIntegrationState()
+  }
+
+  private func resetMotionIntegrationState() {
+    leftStickActiveSince = nil
+    pointerFilter.reset()
+    scrollFilter.reset()
+    scrollAccumulator.reset()
     lastTouch = nil
     lastTouchTime = nil
+  }
+
+  private func handleControllerConnected(event: inout HelmSDLEvent) {
+    let identity = ControllerIdentity(
+      family: controllerFamily(from: event.controller_family),
+      vendorID: UInt16(truncatingIfNeeded: event.vendor_id),
+      productID: UInt16(truncatingIfNeeded: event.product_id)
+    )
+    let connection = ControllerConnection(rawValue: event.connection) ?? .unknown
+    let name = bridgeString(&event)
+
+    if let expected = pendingReconnectIdentity,
+      ControllerReconnectPolicy.canResume(expected: expected, candidate: identity)
+    {
+      pendingReconnectWorkItem?.cancel()
+      pendingReconnectWorkItem = nil
+      pendingReconnectIdentity = nil
+      configureConnectedController(name: name, identity: identity, connection: connection)
+      reconcileButtonsAfterReconnect()
+      if controlsEnabled { InputInjector.beginPointerSession() }
+      queueLatestInput("已恢复 \(name)")
+      setStatus(
+        isListening
+          ? "有线手柄已从音频重枚举中恢复；PTT 与识别保持运行。"
+          : "有线手柄已从音频重枚举中恢复。",
+        log: true
+      )
+      updateLatencyActivity()
+      return
+    }
+
+    if pendingReconnectIdentity != nil {
+      emergencyStop(reason: "重连的不是原手柄", announce: false)
+    } else {
+      emergencyStop(reason: "手柄已连接，等待显式启用", announce: false)
+    }
+    configureConnectedController(name: name, identity: identity, connection: connection)
+    queueLatestInput("已连接 \(name)")
+    setStatus("检测到 \(name)，请检查权限后启用控制。", log: true)
+  }
+
+  private func handleControllerDisconnected(event: HelmSDLEvent) {
+    guard pendingReconnectIdentity == nil else { return }
+    let eventIdentity = ControllerIdentity(
+      family: controllerFamily(from: event.controller_family),
+      vendorID: UInt16(truncatingIfNeeded: event.vendor_id),
+      productID: UInt16(truncatingIfNeeded: event.product_id)
+    )
+    let identity = controllerIdentity ?? eventIdentity
+    if ControllerReconnectPolicy.shouldWait(
+      hasActiveVoiceSession: VoiceSessionPolicy.isActiveForReconnect(
+        isListening: isListening,
+        isFinalizing: voiceFinalizing
+      ),
+      selectedAudioDevice: activeVoiceAudioDevice ?? selectedAudioDevice,
+      connection: controllerConnection,
+      controller: identity
+    ) {
+      beginControllerReconnectGrace(identity: identity)
+      return
+    }
+
+    emergencyStop(reason: "手柄已断开")
+    clearControllerPresentation()
+    queueLatestInput("手柄已断开")
+  }
+
+  private func configureConnectedController(
+    name: String,
+    identity: ControllerIdentity,
+    connection: ControllerConnection
+  ) {
+    controllerIdentity = identity
+    controllerFamily = identity.family
+    controllerConnection = connection
+    controllerConnected = true
+    controllerName = name
+    connectionLabel = connectionName(connection.rawValue)
+    microphoneButtonAvailable = HelmSDLHasMicrophoneButton()
+    touchpadCount = HelmSDLTouchpadCount()
+    hapticsAvailable = hapticBackend.isAvailable()
+  }
+
+  private func clearControllerPresentation() {
+    controllerConnected = false
+    controllerName = "未连接手柄"
+    controllerFamily = .generic
+    controllerIdentity = nil
+    controllerConnection = .unknown
+    connectionLabel = "—"
+    microphoneButtonAvailable = false
+    touchpadCount = 0
+    hapticsAvailable = false
+  }
+
+  private func beginControllerReconnectGrace(identity: ControllerIdentity) {
+    if leftMouseDown {
+      InputInjector.mouseButton(.left, pressed: false)
+      leftMouseDown = false
+    }
+    if rightMouseDown {
+      InputInjector.mouseButton(.right, pressed: false)
+      rightMouseDown = false
+    }
+    leftMouseSources.removeAll()
+    rightMouseSources.removeAll()
+    releaseHeldShortcutModifiers()
+    hapticCoordinator.stop(backend: hapticBackend)
+    InputInjector.endPointerSession()
+    resetMotionState()
+
+    controllerConnected = false
+    controllerName = "有线手柄音频重连中…"
+    connectionLabel = "USB 重枚举"
+    microphoneButtonAvailable = false
+    touchpadCount = 0
+    hapticsAvailable = false
+    pendingReconnectIdentity = identity
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        self?.controllerReconnectTimedOut(expected: identity)
+      }
+    }
+    pendingReconnectWorkItem = workItem
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + ControllerReconnectPolicy.graceInterval,
+      execute: workItem
+    )
+    queueLatestInput("USB 音频启动，等待同一手柄恢复")
+    setStatus("检测到有线手柄音频重枚举；保留 PTT，等待 1.2 秒内自动恢复。", log: true)
+    updateLatencyActivity()
+  }
+
+  private func controllerReconnectTimedOut(expected: ControllerIdentity) {
+    guard pendingReconnectIdentity == expected else { return }
+    pendingReconnectWorkItem = nil
+    pendingReconnectIdentity = nil
+    emergencyStop(reason: "有线手柄重连超时")
+    clearControllerPresentation()
+    queueLatestInput("手柄重连超时")
+    nextAudioRefresh = 0
+  }
+
+  private func reconcileButtonsAfterReconnect() {
+    for button in ControllerButton.allCases where !HelmSDLButtonPressed(button.rawValue) {
+      let transitions = bindingResolver.process(
+        button: button,
+        pressed: false,
+        mapping: mapping
+      )
+      for transition in transitions {
+        handleMappedButton(
+          transition.chord.sourceID,
+          label: transition.chord.label(family: controllerFamily),
+          action: transition.action,
+          pressed: transition.pressed
+        )
+      }
+    }
+  }
+
+  private func completeMappingCapture(with chord: ControllerChord) {
+    guard !SafetyChordPolicy.isReserved(chord, family: controllerFamily) else {
+      cancelMappingCaptureState()
+      setStatus("固定安全急停组合 \(safetyChordLabel) 不能用于普通映射。", log: true)
+      return
+    }
+
+    let action = mappingCaptureOriginalChord.flatMap { mapping.action(for: $0) }
+      ?? pendingMappingAction
+    guard action != .none else {
+      cancelMappingCaptureState()
+      setStatus("请选择一个具体动作后再录入映射。", log: true)
+      return
+    }
+
+    var updated = mapping
+    if let original = mappingCaptureOriginalChord { updated.remove(chord: original) }
+    let removed = updated.upsert(ControllerBinding(chord: chord, action: action))
+    cancelMappingCaptureState(resumeControls: false)
+    mapping = updated
+    let conflictNote = removed.isEmpty ? "" : "；已替换 \(removed.count) 个前缀冲突映射"
+    setStatus(
+      "已录入 \(chord.label(family: controllerFamily)) → \(action.title)\(conflictNote)。",
+      log: true
+    )
+  }
+
+  private func cancelMappingCaptureState(resumeControls: Bool = true) {
+    chordRecorder.cancel()
+    mappingCaptureOriginalChord = nil
+    isRecordingMapping = false
+    mappingCapturePrompt = ""
+    if resumeControls { resumeControlSessionAfterMappingCapture() }
+  }
+
+  private func stopVoiceForMappingCapture() {
+    voice.cancelCurrent()
+    isListening = false
+    voiceFinalizing = false
+    activeVoiceAudioDevice = nil
+    pushToTalkSources.removeAll()
+    invalidateVoiceTestSession()
+    invalidateVoiceTextDelivery()
+    suppressAutoInsertForCurrentVoice = false
+    updateLatencyActivity()
+  }
+
+  private func releaseInjectedInputsPreservingControlSession() {
+    if leftMouseDown { InputInjector.mouseButton(.left, pressed: false) }
+    if rightMouseDown { InputInjector.mouseButton(.right, pressed: false) }
+    leftMouseDown = false
+    rightMouseDown = false
+    leftMouseSources.removeAll()
+    rightMouseSources.removeAll()
+    releaseHeldShortcutModifiers()
+    _ = bindingResolver.reset()
+    hapticCoordinator.stop(backend: hapticBackend)
+    safetyChordTracker.reset()
+    InputInjector.endPointerSession()
+    resetMotionState()
+  }
+
+  private func resumeControlSessionAfterMappingCapture() {
+    resetMotionState()
+    if controlsEnabled, controllerConnected, accessibilityGranted {
+      InputInjector.beginPointerSession()
+    }
+  }
+
+  private func queueLatestInput(_ message: String) {
+    pendingLatestInput = message
+  }
+
+  private func updateLatencyActivity() {
+    let shouldRun = started
+      && (controllerConnected || controlsEnabled || isListening || voiceFinalizing
+        || pendingReconnectIdentity != nil)
+    if shouldRun, latencyActivity == nil {
+      latencyActivity = ProcessInfo.processInfo.beginActivity(
+        options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+        reason: "Helm controller and push-to-talk input"
+      )
+    } else if !shouldRun, let latencyActivity {
+      ProcessInfo.processInfo.endActivity(latencyActivity)
+      self.latencyActivity = nil
+    }
+  }
+
+  private func controllerFamily(from bridgeValue: Int32) -> ControllerFamily {
+    switch bridgeValue {
+    case Int32(HELM_CONTROLLER_FAMILY_PLAYSTATION): return .playStation
+    case Int32(HELM_CONTROLLER_FAMILY_XBOX): return .xbox
+    case Int32(HELM_CONTROLLER_FAMILY_NINTENDO): return .nintendo
+    default: return .generic
+    }
   }
 
   @discardableResult
@@ -910,44 +1591,108 @@ final class AppModel: ObservableObject {
     if let data = try? JSONEncoder().encode(mapping) {
       UserDefaults.standard.set(data, forKey: "controllerMapping")
     }
-    if controlsEnabled || leftMouseDown || rightMouseDown || !pushToTalkSources.isEmpty {
-      emergencyStop(reason: "按键映射已更新")
-    } else if started {
-      setStatus("按键映射已保存。", log: true)
+    guard started else { return }
+    if isListening || voiceFinalizing || !pushToTalkSources.isEmpty {
+      stopVoiceForMappingCapture()
     }
+    releaseInjectedInputsPreservingControlSession()
+    resumeControlSessionAfterMappingCapture()
+    setStatus(
+      controlsEnabled ? "按键映射已保存；控制连接保持启用。" : "按键映射已保存。",
+      log: true
+    )
   }
 
   private func shortcutSettingsDidChange() {
+    releaseHeldShortcutModifiers()
     if let data = try? JSONEncoder().encode(shortcutSettings) {
       UserDefaults.standard.set(data, forKey: "controllerShortcutSettings")
     }
     if started { setStatus("外部快捷键已保存。", log: true) }
   }
 
+  private func releaseHeldShortcutModifiers() {
+    let transitions = modifierHoldCoordinator.reset()
+    _ = InputInjector.applyModifierKeyTransitions(transitions)
+  }
+
   private func refreshPermissionState() {
     let access = InputInjector.accessibilityTrusted()
     let microphone = AVCaptureDevice.authorizationStatus(for: .audio)
     let speech = SFSpeechRecognizer.authorizationStatus()
-    accessibilityGranted = access
-    microphoneAuthorization = microphone
-    speechAuthorization = speech
+    let permissionSnapshot = PermissionDiagnosticSnapshot(
+      accessibilityGranted: access,
+      microphoneRawValue: microphone.rawValue,
+      speechRawValue: speech.rawValue
+    )
+    if let changedSnapshot = permissionDiagnosticTracker.recordIfChanged(permissionSnapshot) {
+      permissionLogger.notice("\(changedSnapshot.logMessage, privacy: .public)")
+    }
+    if accessibilityGranted != access { accessibilityGranted = access }
+    if microphoneAuthorization != microphone { microphoneAuthorization = microphone }
+    if speechAuthorization != speech { speechAuthorization = speech }
 
     if controlsEnabled, !access {
       emergencyStop(reason: "辅助功能权限已失效")
-    } else if isListening, microphone != .authorized || speech != .authorized {
+    } else if VoiceSessionPolicy.isActiveForReconnect(
+      isListening: isListening,
+      isFinalizing: voiceFinalizing
+    ), microphone != .authorized || speech != .authorized {
       voice.cancelCurrent()
       isListening = false
+      voiceFinalizing = false
+      activeVoiceAudioDevice = nil
       pushToTalkSources.removeAll()
       invalidateVoiceTestSession()
+      invalidateVoiceTextDelivery()
       suppressAutoInsertForCurrentVoice = false
+      updateLatencyActivity()
       setStatus("语音权限已失效，PTT 已安全停止。", log: true)
     }
   }
 
   private func refreshAudioDevices() {
-    let refreshed = AudioInputCatalog.devices()
+    guard pendingReconnectIdentity == nil, audioRefreshGate.begin() else { return }
+    DispatchQueue.global(qos: .utility).async {
+      let refreshed = AudioInputCatalog.devices()
+      DispatchQueue.main.async { [weak self] in
+        MainActor.assumeIsolated {
+          guard let self else { return }
+          self.audioRefreshGate.end()
+          self.applyAudioDevices(refreshed)
+        }
+      }
+    }
+  }
+
+  private func applyAudioDevices(_ fetchedDevices: [AudioInputDevice]) {
+    guard pendingReconnectIdentity == nil else { return }
+    var refreshed = fetchedDevices
     let previousSelection = selectedAudioDeviceID
-    audioDevices = refreshed
+    let previousDevice = audioDevices.first(where: { $0.id == previousSelection })
+
+    if previousSelection != 0,
+      !refreshed.contains(where: { $0.id == previousSelection }),
+      let controllerAudio = activeVoiceAudioDevice ?? previousDevice,
+      controllerAudio.isControllerRoutedUSB
+    {
+      let replacement = refreshed.first(where: {
+        $0.isControllerRoutedUSB
+          && $0.name.localizedCaseInsensitiveCompare(controllerAudio.name) == .orderedSame
+      })
+      if let replacement,
+        controllerConnected,
+        ControllerReconnectPolicy.canMigrateAudioRoute(connection: controllerConnection)
+      {
+        selectedAudioDeviceID = replacement.id
+      } else if VoiceSessionPolicy.isActiveForReconnect(
+        isListening: isListening,
+        isFinalizing: voiceFinalizing
+      ) {
+        refreshed.append(controllerAudio)
+      }
+    }
+    if audioDevices != refreshed { audioDevices = refreshed }
     if !audioSelectionInitialized {
       audioSelectionInitialized = true
       selectedAudioDeviceID =
@@ -955,15 +1700,22 @@ final class AppModel: ObservableObject {
           from: refreshed,
           protectPlayback: protectPlaybackAudio
         )?.id ?? 0
-    } else if previousSelection != 0,
-      !refreshed.contains(where: { $0.id == previousSelection })
+    } else if selectedAudioDeviceID != 0,
+      !refreshed.contains(where: { $0.id == selectedAudioDeviceID })
     {
-      if isListening {
+      if VoiceSessionPolicy.isActiveForReconnect(
+        isListening: isListening,
+        isFinalizing: voiceFinalizing
+      ) {
         voice.cancelCurrent()
         isListening = false
+        voiceFinalizing = false
+        activeVoiceAudioDevice = nil
         pushToTalkSources.removeAll()
         invalidateVoiceTestSession()
+        invalidateVoiceTextDelivery()
         suppressAutoInsertForCurrentVoice = false
+        updateLatencyActivity()
         setStatus("选择的麦克风已拔出，PTT 已停止；未自动切换。", log: true)
       }
       selectedAudioDeviceID = 0
@@ -984,9 +1736,13 @@ final class AppModel: ObservableObject {
     if plan.shouldStopCapture {
       voice.cancelCurrent()
       isListening = false
+      voiceFinalizing = false
+      activeVoiceAudioDevice = nil
       pushToTalkSources.removeAll()
       invalidateVoiceTestSession()
+      invalidateVoiceTextDelivery()
       suppressAutoInsertForCurrentVoice = false
+      updateLatencyActivity()
     }
     selectedAudioDeviceID = plan.replacement?.id ?? 0
     guard announce else { return }
@@ -1084,7 +1840,21 @@ final class AppModel: ObservableObject {
   private func recordApplicationActivation(_ application: NSRunningApplication) {
     focusHistory.recordActivation(
       processIdentifier: application.processIdentifier,
+      processLaunchTime: application.launchDate?.timeIntervalSinceReferenceDate,
       helmProcessIdentifier: ProcessInfo.processInfo.processIdentifier
+    )
+  }
+
+  private func runningApplicationMatches(_ identity: ExternalProcessIdentity) -> Bool {
+    guard
+      let application = NSRunningApplication(
+        processIdentifier: identity.processIdentifier
+      ), !application.isTerminated
+    else { return false }
+    return ExternalProcessIdentityPolicy.matches(
+      expected: identity,
+      candidateProcessIdentifier: application.processIdentifier,
+      candidateLaunchTime: application.launchDate?.timeIntervalSinceReferenceDate
     )
   }
 

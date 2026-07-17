@@ -1,10 +1,9 @@
 # Helm Demo for macOS
 
-This is the local SwiftUI demo for controlling macOS with a DualSense. It uses
-SDL3 for the dedicated microphone button and touch contacts, CoreGraphics for
-pointer/click/scroll output, and AVFoundation + Apple Speech for push-to-talk
-transcription. The SDL bridge accepts only PS5-class controllers, so an Xbox or
-generic gamepad cannot be selected accidentally.
+This is the local SwiftUI demo for controlling macOS with PlayStation, Xbox,
+and Nintendo controllers. It uses SDL3 for buttons, paddles and touch contacts,
+CoreGraphics for pointer/click/scroll output, and AVFoundation + Apple Speech
+for push-to-talk transcription.
 
 ## Try it
 
@@ -19,14 +18,23 @@ generic gamepad cannot be selected accidentally.
    Cross/Circle for click or hold-to-drag. The right stick scrolls, D-pad pages,
    and the microphone button controls PTT. L2 brakes pointer/scroll speed and R2
    accelerates it.
-6. Hold Options, then press the touchpad button within two seconds to use the
-   emergency enable/disable gesture.
+6. Press Options and the touchpad button within two seconds, in either order,
+   to emergency-stop controls. This gesture never enables controls.
 
-The control center can remap Cross, Circle, Create, D-pad up/down, and the
-microphone button, including three configurable keyboard-shortcut actions for
-external input methods. It also exposes the input polling rate, a smooth
-hold-to-accelerate curve, and racing-style L2/R2 speed multipliers. These
-settings persist locally.
+The control center records any supported single button or combination of up to
+four buttons, including SDL's four professional-controller paddle positions.
+Mappings include three configurable keyboard-shortcut actions for external
+input methods, including held Command/Control/Option/Shift-only mappings with
+independent left/right physical modifier selection. Mapping capture suppresses
+desktop injection while recording but keeps the controller and enabled control
+session connected.
+The current analog state is actively sampled at a configurable 60–240 Hz
+(240 Hz by default) instead of relying on per-axis SDL event frequency.
+The default curve now uses a low-latency radial response floor and 6 ms
+smoothing; fractional continuous-pixel scrolling starts on the first sampled
+frame instead of waiting for an integer pixel. The response, smoothing, smooth
+hold-to-accelerate curve, and racing-style trigger speed multipliers remain
+configurable and are persisted locally.
 
 Semantic haptics are optional and off by default. When enabled, short tuned
 pulses acknowledge clicks, navigation, shortcuts, and PTT state changes; normal
@@ -39,14 +47,28 @@ recognition without a controller, then returns to the last external foreground
 application before committing text. If that focus cannot be restored and
 confirmed within 0.5 seconds, transcription is retained in Helm and automatic
 insertion is suppressed. Text insertion first uses the focused
-Accessibility element and falls back to Unicode keyboard events for supported
-editable roles. Unicode event delivery is shown as unconfirmed because a target
+Accessibility element and falls back to Unicode keyboard events only after the
+focused element PID matches the target captured at PTT start, including web
+editors that expose generic AX roles. The physical PTT path keeps that captured
+target for the whole recognition session, revalidates it immediately before
+delivery, then uses a global HID Unicode event so web/Electron editors receive
+the same route as normal keyboard input.
+Unicode event delivery is shown as unconfirmed because a target
 application may ignore it. Secure fields and system secure-input mode are
 refused. It never uses the clipboard as a hidden fallback.
+If a completed transcript remains in Helm, activate the intended external text
+field again and then use **重新发送到外部焦点**. This explicit recovery path
+consumes that post-recognition activation, validates both the target PID and
+process launch time on every retry, uses the same secure-input checks, waits for
+any automatic delivery to finish, and does not capture audio again.
 
-Sony does not support the DualSense built-in microphone as a Mac audio input.
-The controller microphone button controls PTT; the visible microphone picker
-selects the actual Mac-supported input source.
+The target Mac currently exposes a wired DualSense as a 48 kHz USB audio input.
+When that route briefly re-enumerates the controller HID while PTT starts, Helm
+releases held pointer actions immediately but preserves recognition for a
+bounded same-controller reconnect. The visible microphone picker remains the
+source of truth; Bluetooth controller audio is not treated as a music-safe
+input route. Controller PTT is independent of the desktop-control switch, so
+the target application can retain focus while mouse injection remains off.
 Playback protection is on by default and avoids Bluetooth microphone inputs so
 AirPods or another Bluetooth output does not switch into its call profile;
 choose a built-in/USB microphone, or explicitly disable the protection.
@@ -64,11 +86,18 @@ URLs and checksums. Then run:
 macos-app/scripts/build-and-install.sh --launch
 ```
 
-The script runs the pure mapping tests, builds with the installed Command Line
-Tools, embeds SDL3 and inactive pinned Sparkle, applies an ad-hoc signature,
-verifies the bundle, preserves the previous installation only while replacement
-is in progress, and keeps one
-installed copy in `~/Applications`.
+The script runs the pure mapping tests and an isolated SDL virtual-gamepad
+analog-read integration test, builds with the installed Command Line Tools,
+embeds SDL3 and inactive pinned Sparkle, applies an ad-hoc signature with
+a stable local designated requirement, verifies the bundle, preserves the
+top-level app directory while transactionally replacing only its `Contents`,
+and keeps one installed copy in `~/Applications`. The first migration from an older ad-hoc
+identity can require one final permission grant; later in-place local builds
+retain the same requirement. On the target Mac, six updates from build 11
+through build 17 changed CDHash each time while preserving the app inode and
+requirement, and all three privacy statuses remained authorized after every
+relaunch. Formal releases do not use this local identity, so that result must
+not be generalized to Developer ID distribution.
 
 This development installer cannot create a public release. The separate
 fail-closed readiness check is:
