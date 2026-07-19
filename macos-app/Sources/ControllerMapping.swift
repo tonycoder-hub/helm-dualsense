@@ -482,6 +482,24 @@ enum ControllerReconnectPolicy {
   }
 }
 
+enum LaunchControlAutoEnablePolicy {
+  static let defaultEnabled = true
+}
+
+struct LaunchControlAutoEnableGate {
+  private var pending: Bool
+
+  init(settingEnabled: Bool, controllerAlreadyConnected: Bool) {
+    pending = settingEnabled && controllerAlreadyConnected
+  }
+
+  mutating func consumeForConnection() -> Bool {
+    let shouldEnable = pending
+    pending = false
+    return shouldEnable
+  }
+}
+
 enum ControllerButton: Int32, CaseIterable, Codable, Identifiable {
   case south = 1
   case east

@@ -45,13 +45,23 @@ final class AppModel: ObservableObject {
   @Published var microphoneButtonAvailable = false
   @Published var touchpadCount: Int32 = 0
   @Published var controlsEnabled = false
+  @Published var autoEnableControlsOnLaunch = LaunchControlAutoEnablePolicy.defaultEnabled {
+    didSet {
+      UserDefaults.standard.set(
+        autoEnableControlsOnLaunch,
+        forKey: "autoEnableControlsOnLaunch"
+      )
+    }
+  }
   @Published var accessibilityGranted = false
   @Published var microphoneAuthorization = AVCaptureDevice.authorizationStatus(for: .audio)
   @Published var speechAuthorization = SFSpeechRecognizer.authorizationStatus()
   @Published var isListening = false
   @Published var lastAudioSampleRate = 0.0
   @Published var transcript = "按住手柄麦克风键说话，识别结果会显示在这里。"
-  @Published var autoInsert = true
+  @Published var autoInsert = true {
+    didSet { UserDefaults.standard.set(autoInsert, forKey: "autoInsert") }
+  }
   @Published var localeIdentifier = "zh-CN"
   @Published var protectPlaybackAudio = true {
     didSet {
@@ -60,10 +70,16 @@ final class AppModel: ObservableObject {
     }
   }
   @Published var pointerGain = 1.0 {
-    didSet { UserDefaults.standard.set(pointerGain, forKey: "pointerGain") }
+    didSet {
+      UserDefaults.standard.set(pointerGain, forKey: "pointerGain")
+      if started { syncMotionConfiguration() }
+    }
   }
   @Published var scrollGain = 8.0 {
-    didSet { UserDefaults.standard.set(scrollGain, forKey: "scrollGain") }
+    didSet {
+      UserDefaults.standard.set(scrollGain, forKey: "scrollGain")
+      if started { syncMotionConfiguration() }
+    }
   }
   @Published var inputPollingRate = InputCadencePolicy.defaultRate {
     didSet {
@@ -72,29 +88,44 @@ final class AppModel: ObservableObject {
     }
   }
   @Published var measuredInputRate = 0.0
+  @Published var measuredDisplayRate = 0.0
   @Published var inputCadenceLabel = "240 Hz 主动采样"
+  @Published var outputCadenceLabel = "显示同步"
+  @Published var inputJitterLabel = "等待 5 秒节拍样本"
   @Published var stickResponseExponent = ControlMath.defaultStickResponseExponent {
-    didSet { UserDefaults.standard.set(stickResponseExponent, forKey: "stickResponseExponent") }
+    didSet {
+      UserDefaults.standard.set(stickResponseExponent, forKey: "stickResponseExponent")
+      if started { syncMotionConfiguration() }
+    }
   }
   @Published var stickSmoothingMilliseconds = ControlMath.defaultStickSmoothingTime * 1_000 {
     didSet {
       UserDefaults.standard.set(stickSmoothingMilliseconds, forKey: "stickSmoothingMilliseconds")
+      if started { syncMotionConfiguration() }
     }
   }
   @Published var stickAccelerationDuration = 1.6 {
     didSet {
       UserDefaults.standard.set(stickAccelerationDuration, forKey: "stickAccelerationDuration")
+      if started { syncMotionConfiguration() }
     }
   }
   @Published var stickMaximumBoost = 2.2 {
-    didSet { UserDefaults.standard.set(stickMaximumBoost, forKey: "stickMaximumBoost") }
+    didSet {
+      UserDefaults.standard.set(stickMaximumBoost, forKey: "stickMaximumBoost")
+      if started { syncMotionConfiguration() }
+    }
   }
   @Published var brakeMinimumSpeed = 0.28 {
-    didSet { UserDefaults.standard.set(brakeMinimumSpeed, forKey: "brakeMinimumSpeed") }
+    didSet {
+      UserDefaults.standard.set(brakeMinimumSpeed, forKey: "brakeMinimumSpeed")
+      if started { syncMotionConfiguration() }
+    }
   }
   @Published var acceleratorMaximumSpeed = 2.6 {
     didSet {
       UserDefaults.standard.set(acceleratorMaximumSpeed, forKey: "acceleratorMaximumSpeed")
+      if started { syncMotionConfiguration() }
     }
   }
   @Published var hapticsEnabled = HapticFeedbackPolicy.defaultEnabled {
@@ -120,7 +151,7 @@ final class AppModel: ObservableObject {
     }
   }
   @Published var latestInput = "等待手柄连接"
-  @Published var statusMessage = "Helm 已就绪；启动时不会注入输入或录音。"
+  @Published var statusMessage = "Helm 已就绪；已连接手柄将按启动设置决定是否启用控制，录音仍需按下 PTT。"
   @Published var activity: [String] = []
   @Published var audioDevices: [AudioInputDevice] = []
   @Published var selectedAudioDeviceID = AudioDeviceID(0)
@@ -130,25 +161,51 @@ final class AppModel: ObservableObject {
 
   private let voice = VoiceService()
   private let updateController = HelmUpdateController()
-  private let cadenceDriver = InputCadenceDriver()
+  private let eventCadenceDriver = MainEventCadenceDriver()
+  private let motionSamplingDriver = MotionSamplingDriver(
+    analogReader: {
+      var analog = HelmSDLAnalogState()
+      guard HelmSDLReadAnalogState(&analog) else { return nil }
+      return ControllerAnalogSample(
+        leftX: Double(analog.left_x),
+        leftY: Double(analog.left_y),
+        rightY: Double(analog.right_y),
+        leftTrigger: Double(analog.left_trigger),
+        rightTrigger: Double(analog.right_trigger)
+      )
+    },
+    pointerOutput: { delta, leftButtonDown, rightButtonDown in
+      InputInjector.movePointer(
+        dx: delta.x,
+        dy: delta.y,
+        leftButtonDown: leftButtonDown,
+        rightButtonDown: rightButtonDown
+      )
+    },
+    scrollOutput: { sample in
+      InputInjector.scroll(sample: sample)
+    }
+  )
   private let permissionLogger = Logger(
     subsystem: "io.github.tonycoder-hub.helm",
     category: "permissions"
   )
+  private let voiceDeliveryLogger = Logger(
+    subsystem: "io.github.tonycoder-hub.helm",
+    category: "voice-delivery"
+  )
+  private let motionCadenceLogger = Logger(
+    subsystem: "io.github.tonycoder-hub.helm",
+    category: "motion-cadence"
+  )
   private var terminationObserver: NSObjectProtocol?
   private var workspaceActivationObserver: NSObjectProtocol?
   private var started = false
-  private var lastTick = ProcessInfo.processInfo.systemUptime
   private var nextPermissionRefresh = 0.0
   private var nextAudioRefresh = 0.0
   private var nextDiagnosticsRefresh = 0.0
-  private var cadenceMeasurementStartedAt = 0.0
-  private var cadenceTickCount = 0
+  private var nextMotionCadenceLog = 0.0
   private var analogState = ControllerAnalogState()
-  private var leftStickActiveSince: TimeInterval?
-  private var scrollAccumulator = ContinuousScrollAccumulator()
-  private var pointerFilter = StickMotionFilter()
-  private var scrollFilter = StickMotionFilter()
   private var lastTouch: CGPoint?
   private var lastTouchTime: TimeInterval?
   private var leftMouseDown = false
@@ -171,6 +228,7 @@ final class AppModel: ObservableObject {
   private var activeVoiceDeliveryToken: UInt64?
   private var voiceInsertionTarget: Int32?
   private var voiceInsertionProcessIdentity: ExternalProcessIdentity?
+  private var voiceInsertionFocusSnapshot: ExternalTextFocusSnapshot?
   private var lastCompletedTranscript: String?
   private var manualDeliveryActivationBaseline: UInt64?
   private let hapticBackend = SDLHapticBackend()
@@ -184,6 +242,10 @@ final class AppModel: ObservableObject {
   private var controllerConnection = ControllerConnection.unknown
   private var pendingReconnectIdentity: ControllerIdentity?
   private var pendingReconnectWorkItem: DispatchWorkItem?
+  private var launchAutoEnableGate = LaunchControlAutoEnableGate(
+    settingEnabled: false,
+    controllerAlreadyConnected: false
+  )
   private var latencyActivity: NSObjectProtocol?
   private var permissionDiagnosticTracker = PermissionDiagnosticTracker()
 
@@ -225,6 +287,12 @@ final class AppModel: ObservableObject {
     if defaults.object(forKey: "protectPlaybackAudio") != nil {
       protectPlaybackAudio = defaults.bool(forKey: "protectPlaybackAudio")
     }
+    if defaults.object(forKey: "autoInsert") != nil {
+      autoInsert = defaults.bool(forKey: "autoInsert")
+    }
+    if defaults.object(forKey: "autoEnableControlsOnLaunch") != nil {
+      autoEnableControlsOnLaunch = defaults.bool(forKey: "autoEnableControlsOnLaunch")
+    }
     if let data = defaults.data(forKey: "controllerMapping"),
       let decoded = try? JSONDecoder().decode(ControllerMapping.self, from: data)
     {
@@ -234,6 +302,11 @@ final class AppModel: ObservableObject {
       let decoded = try? JSONDecoder().decode(ControllerShortcutSettings.self, from: data)
     {
       shortcutSettings = decoded
+    }
+    motionSamplingDriver.setTelemetryHandler(queue: .main) { [weak self] telemetry in
+      MainActor.assumeIsolated {
+        self?.applyMotionTelemetry(telemetry)
+      }
     }
   }
 
@@ -311,6 +384,15 @@ final class AppModel: ObservableObject {
       appendActivity("SDL3 3.4.12 事件层已启动")
     }
 
+    var launchAnalogState = HelmSDLAnalogState()
+    let controllerAlreadyConnected = ok
+      && HelmSDLReadAnalogState(&launchAnalogState)
+      && launchAnalogState.connected != 0
+    launchAutoEnableGate = LaunchControlAutoEnableGate(
+      settingEnabled: autoEnableControlsOnLaunch,
+      controllerAlreadyConnected: controllerAlreadyConnected
+    )
+
     startCadence()
 
     terminationObserver = NotificationCenter.default.addObserver(
@@ -367,6 +449,7 @@ final class AppModel: ObservableObject {
     controlsEnabled = true
     resetMotionState()
     InputInjector.beginPointerSession()
+    syncMotionConfiguration()
     updateLatencyActivity()
     setStatus("控制已启用。固定安全组合键可随时紧急停止。", log: true)
     playHaptic(.controlEnabled)
@@ -484,6 +567,10 @@ final class AppModel: ObservableObject {
     manualDeliveryActivationBaseline = focusHistory.activationGeneration
     voiceInsertionTarget = targetIdentity.processIdentifier
     voiceInsertionProcessIdentity = targetIdentity
+    voiceInsertionFocusSnapshot = InputInjector.captureExternalTextFocus(
+      processIdentifier: targetIdentity.processIdentifier,
+      allowsApplicationFallback: true
+    )
     let token = voiceDeliveryGeneration.begin()
     activeVoiceDeliveryToken = token
     setStatus("正在把已识别文本重新发送到上一个外部焦点…", log: true)
@@ -552,6 +639,7 @@ final class AppModel: ObservableObject {
 
   func beginMappingCapture(replacing chord: ControllerChord? = nil) {
     guard !isRecordingMapping else { return }
+    motionSamplingDriver.disableOutputAndWait()
     let voiceActive = isListening || voiceFinalizing || !pushToTalkSources.isEmpty
     let plan = MappingCapturePolicy.begin(
       controlsEnabled: controlsEnabled,
@@ -565,6 +653,7 @@ final class AppModel: ObservableObject {
     mappingCaptureOriginalChord = chord
     chordRecorder.begin()
     isRecordingMapping = true
+    syncMotionConfiguration()
     mappingCapturePrompt = chord == nil
       ? "请按住 1–4 个手柄键，再松开全部按键"
       : "请录入替代 \(chord!.label(family: controllerFamily)) 的新按键或组合键"
@@ -586,7 +675,8 @@ final class AppModel: ObservableObject {
   }
 
   func shutdown() {
-    cadenceDriver.stop()
+    eventCadenceDriver.stop()
+    motionSamplingDriver.stop()
     emergencyStop(reason: "应用退出")
     HelmSDLStop()
     if let terminationObserver {
@@ -601,16 +691,19 @@ final class AppModel: ObservableObject {
 
   private func startCadence() {
     measuredInputRate = 0
-    lastTick = ProcessInfo.processInfo.systemUptime
-    nextPermissionRefresh = lastTick + 1
-    nextAudioRefresh = lastTick + 3
-    nextDiagnosticsRefresh = lastTick
-    cadenceMeasurementStartedAt = lastTick
-    cadenceTickCount = 0
-    inputCadenceLabel = cadenceDriver.start(rate: inputPollingRate) { [weak self] in
-      self?.tick()
+    measuredDisplayRate = 0
+    inputJitterLabel = "等待 5 秒独立节拍样本"
+    let now = ProcessInfo.processInfo.systemUptime
+    nextPermissionRefresh = now + 1
+    nextAudioRefresh = now + 3
+    nextDiagnosticsRefresh = now
+    syncMotionConfiguration()
+    inputCadenceLabel = motionSamplingDriver.start(rate: inputPollingRate)
+    let eventLabel = eventCadenceDriver.start(rate: 60) { [weak self] in
+      self?.eventTick()
     }
-    appendActivity("输入节拍：\(inputCadenceLabel)")
+    outputCadenceLabel = "240 Hz 独立队列直接输出"
+    appendActivity("输入节拍：\(inputCadenceLabel)；\(eventLabel)")
   }
 
   private func requestSpeechPermissionIfNeeded() {
@@ -623,114 +716,14 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func tick() {
+  private func eventTick() {
     let now = ProcessInfo.processInfo.systemUptime
-    let elapsed = now - lastTick
-    lastTick = now
-    cadenceTickCount += 1
-    let cadenceElapsed = now - cadenceMeasurementStartedAt
-    if cadenceElapsed >= 1 {
-      let roundedRate = Double(Int((Double(cadenceTickCount) / cadenceElapsed).rounded()))
-      if measuredInputRate != roundedRate { measuredInputRate = roundedRate }
-      cadenceMeasurementStartedAt = now
-      cadenceTickCount = 0
-    }
-
-    let hasActiveInput = controlsEnabled || isListening || voiceFinalizing
-      || leftMouseDown || rightMouseDown || !pushToTalkSources.isEmpty
-    if TimerGapPolicy.shouldEmergencyStop(
-      elapsed: elapsed,
-      hasActiveInput: hasActiveInput
-    ) {
-      emergencyStop(reason: "检测到系统睡眠/超长定时器间隔")
-    } else if elapsed > ControlMath.maximumTimerGap {
-      resetMotionIntegrationState()
-    }
-
     var processed = 0
     var event = HelmSDLEvent()
     while processed < 512, HelmSDLPoll(&event) {
       handle(event, now: now)
       processed += 1
       event = HelmSDLEvent()
-    }
-
-    var analog = HelmSDLAnalogState()
-    if controllerConnected, HelmSDLReadAnalogState(&analog) {
-      analogState.applyPolledSample(
-        ControllerAnalogSample(
-          leftX: Double(analog.left_x),
-          leftY: Double(analog.left_y),
-          rightY: Double(analog.right_y),
-          leftTrigger: Double(analog.left_trigger),
-          rightTrigger: Double(analog.right_trigger)
-        )
-      )
-      if hypot(analogState.leftX, analogState.leftY) > ControlMath.stickDeadZone {
-        pendingMotionDiagnostic = .leftStick(x: analogState.leftX, y: analogState.leftY)
-      } else if abs(analogState.rightY) > ControlMath.scrollStickDeadZone {
-        pendingMotionDiagnostic = .rightStickY(analogState.rightY)
-      } else if analogState.leftTrigger > 0.01 || analogState.rightTrigger > 0.01 {
-        pendingMotionDiagnostic = .triggers(
-          left: analogState.leftTrigger,
-          right: analogState.rightTrigger,
-          multiplier: currentRacingSpeedMultiplier
-        )
-      }
-    }
-
-    if controllerConnected, controlsEnabled, accessibilityGranted, !isRecordingMapping {
-      let safeElapsed = TimerGapPolicy.integrationDeltaTime(elapsed: elapsed)
-      let pointerVector = pointerFilter.update(
-        x: analogState.leftX,
-        y: analogState.leftY,
-        deadZone: ControlMath.stickDeadZone,
-        responseExponent: stickResponseExponent,
-        responseTime: stickSmoothingMilliseconds / 1_000,
-        deltaTime: safeElapsed
-      )
-      let stickMagnitude = hypot(pointerVector.x, pointerVector.y)
-      if stickMagnitude > 0 {
-        if leftStickActiveSince == nil { leftStickActiveSince = now }
-      } else {
-        leftStickActiveSince = nil
-      }
-      let holdDuration = leftStickActiveSince.map { max(now - $0, 0) } ?? 0
-      let pointer = ControlMath.integratedStickPointerDelta(
-        x: pointerVector.x,
-        y: pointerVector.y,
-        gain: pointerGain * currentRacingSpeedMultiplier,
-        maximumSpeed: ControlMath.stickPointerMaximumSpeed,
-        holdDuration: holdDuration,
-        accelerationDuration: stickAccelerationDuration,
-        maximumBoost: stickMaximumBoost,
-        deltaTime: safeElapsed
-      )
-      if pointer != .zero {
-        InputInjector.movePointer(
-          dx: pointer.x,
-          dy: pointer.y,
-          leftButtonDown: leftMouseDown,
-          rightButtonDown: rightMouseDown
-        )
-      }
-
-      let scrollVector = scrollFilter.update(
-        x: 0,
-        y: analogState.rightY,
-        deadZone: ControlMath.scrollStickDeadZone,
-        responseExponent: stickResponseExponent,
-        responseTime: stickSmoothingMilliseconds / 1_000,
-        deltaTime: safeElapsed
-      )
-      let scroll = ControlMath.continuousScrollDelta(
-        axis: scrollVector.y,
-        deadZone: 0,
-        gain: scrollGain * currentRacingSpeedMultiplier,
-        deltaTime: safeElapsed
-      )
-      let scrollSample = scrollAccumulator.update(precisePixels: scroll)
-      if scrollSample != .zero { InputInjector.scroll(sample: scrollSample) }
     }
 
     if now >= nextDiagnosticsRefresh {
@@ -764,7 +757,68 @@ final class AppModel: ObservableObject {
       refreshAudioDevices()
       nextAudioRefresh = now + 3
     }
+    syncMotionConfiguration()
     updateLatencyActivity()
+  }
+
+  private func syncMotionConfiguration() {
+    motionSamplingDriver.updateConfiguration(
+      MotionSamplingConfiguration(
+        outputEnabled: controllerConnected && controlsEnabled && accessibilityGranted
+          && !isRecordingMapping,
+        leftButtonDown: leftMouseDown,
+        rightButtonDown: rightMouseDown,
+        pointerGain: pointerGain,
+        scrollGain: scrollGain,
+        responseExponent: stickResponseExponent,
+        responseTime: stickSmoothingMilliseconds / 1_000,
+        accelerationDuration: stickAccelerationDuration,
+        maximumBoost: stickMaximumBoost,
+        brakeMinimumSpeed: brakeMinimumSpeed,
+        acceleratorMaximumSpeed: acceleratorMaximumSpeed
+      )
+    )
+  }
+
+  private func applyMotionTelemetry(_ telemetry: MotionSamplingTelemetry) {
+    if telemetry.emergencyStopRequested, controlsEnabled {
+      emergencyStop(reason: "检测到系统睡眠/独立采样超长间隔")
+      return
+    }
+
+    let roundedInputRate = Double(Int(telemetry.inputRate.rounded()))
+    let roundedOutputRate = Double(Int(telemetry.outputRate.rounded()))
+    if measuredInputRate != roundedInputRate { measuredInputRate = roundedInputRate }
+    if measuredDisplayRate != roundedOutputRate { measuredDisplayRate = roundedOutputRate }
+    if telemetry.jitterMaximumMilliseconds > 0 {
+      let label = String(
+        format: "p95 %.1f ms · 最大 %.1f ms · 延迟 %.1f%%",
+        telemetry.jitterP95Milliseconds,
+        telemetry.jitterMaximumMilliseconds,
+        telemetry.lateTickPercentage
+      )
+      if inputJitterLabel != label { inputJitterLabel = label }
+    }
+    let now = ProcessInfo.processInfo.systemUptime
+    if roundedInputRate > 0, now >= nextMotionCadenceLog {
+      motionCadenceLogger.info(
+        "cadence input=\(roundedInputRate, privacy: .public) output=\(roundedOutputRate, privacy: .public) enabled=\(self.controlsEnabled, privacy: .public)"
+      )
+      nextMotionCadenceLog = now + 5
+    }
+
+    analogState = telemetry.analogState
+    if hypot(analogState.leftX, analogState.leftY) > ControlMath.stickDeadZone {
+      pendingMotionDiagnostic = .leftStick(x: analogState.leftX, y: analogState.leftY)
+    } else if abs(analogState.rightY) > ControlMath.scrollStickDeadZone {
+      pendingMotionDiagnostic = .rightStickY(analogState.rightY)
+    } else if analogState.leftTrigger > 0.01 || analogState.rightTrigger > 0.01 {
+      pendingMotionDiagnostic = .triggers(
+        left: analogState.leftTrigger,
+        right: analogState.rightTrigger,
+        multiplier: currentRacingSpeedMultiplier
+      )
+    }
   }
 
   private func handle(_ sourceEvent: HelmSDLEvent, now: TimeInterval) {
@@ -889,6 +943,7 @@ final class AppModel: ObservableObject {
       if nextState != leftMouseDown {
         leftMouseDown = nextState
         InputInjector.mouseButton(.left, pressed: nextState)
+        syncMotionConfiguration()
         if nextState { playHaptic(.primaryAction) }
       }
     case .secondaryClick:
@@ -898,6 +953,7 @@ final class AppModel: ObservableObject {
       if nextState != rightMouseDown {
         rightMouseDown = nextState
         InputInjector.mouseButton(.right, pressed: nextState)
+        syncMotionConfiguration()
         if nextState { playHaptic(.secondaryAction) }
       }
     case .pageUp:
@@ -1078,6 +1134,7 @@ final class AppModel: ObservableObject {
     lastCompletedTranscript = nil
     manualDeliveryActivationBaseline = nil
     voiceInsertionProcessIdentity = nil
+    voiceInsertionFocusSnapshot = nil
     let helmProcessIdentifier = ProcessInfo.processInfo.processIdentifier
     let currentProcessIdentifier =
       NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
@@ -1085,9 +1142,28 @@ final class AppModel: ObservableObject {
       currentProcessIdentifier: currentProcessIdentifier,
       helmProcessIdentifier: helmProcessIdentifier
     )
+    if let target = voiceInsertionTarget {
+      voiceInsertionFocusSnapshot = InputInjector.captureExternalTextFocus(
+        processIdentifier: target
+      )
+      if let application = NSRunningApplication(processIdentifier: target),
+        !application.isTerminated,
+        let launchTime = application.launchDate?.timeIntervalSinceReferenceDate
+      {
+        voiceInsertionProcessIdentity = ExternalProcessIdentity(
+          processIdentifier: target,
+          launchTime: launchTime
+        )
+      }
+    }
+    let targetForLog = voiceInsertionTarget ?? 0
+    let focusRoleForLog = voiceInsertionFocusSnapshot?.role ?? "none"
+    let focusSubroleForLog = voiceInsertionFocusSnapshot?.subrole ?? "none"
+    voiceDeliveryLogger.info(
+      "capture targetPID=\(targetForLog, privacy: .public) focusSnapshot=\(self.voiceInsertionFocusSnapshot != nil, privacy: .public) role=\(focusRoleForLog, privacy: .public) subrole=\(focusSubroleForLog, privacy: .public) autoInsert=\(self.autoInsert, privacy: .public)"
+    )
     activeVoiceDeliveryToken = voiceDeliveryGeneration.begin()
     defer {
-      lastTick = ProcessInfo.processInfo.systemUptime
       resetMotionIntegrationState()
     }
     do {
@@ -1123,6 +1199,7 @@ final class AppModel: ObservableObject {
 
   private func endVoice(commit: Bool, source: String) {
     guard isListening else { return }
+    if !commit { invalidateVoiceTextDelivery() }
     isListening = false
     voiceFinalizing = commit
     updateLatencyActivity()
@@ -1172,6 +1249,11 @@ final class AppModel: ObservableObject {
     attemptsRemaining: Int
   ) {
     guard activeVoiceDeliveryToken == token, voiceDeliveryGeneration.accepts(token) else { return }
+    guard !HelmSecureInputEnabled() else {
+      invalidateVoiceTextDelivery()
+      setStatus("检测到系统安全输入；识别文本只保留在 Helm 中。", log: true)
+      return
+    }
     let helmProcessIdentifier = ProcessInfo.processInfo.processIdentifier
     let currentProcessIdentifier =
       NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
@@ -1187,15 +1269,20 @@ final class AppModel: ObservableObject {
       return
     }
 
-    if let expectedIdentity = voiceInsertionProcessIdentity,
-      !runningApplicationMatches(expectedIdentity)
-    {
+    let identityMatches = voiceInsertionProcessIdentity.map(runningApplicationMatches) ?? false
+    let focusResolution = TextInsertionPolicy.voiceFocusSnapshotResolution(
+      hasCapturedSnapshot: voiceInsertionFocusSnapshot != nil,
+      targetIsFrontmost: currentProcessIdentifier == target,
+      processIdentityMatches: identityMatches
+    )
+
+    guard focusResolution != .refuse else {
       invalidateVoiceTextDelivery()
-      setStatus("外部目标进程已经更换；为避免误写，文本保留在 Helm 中。", log: true)
+      setStatus("无法确认外部目标进程身份；为避免误写，文本保留在 Helm 中。", log: true)
       return
     }
 
-    if currentProcessIdentifier != target {
+    if focusResolution == .retryAfterActivation {
       guard let nextAttemptCount = VoiceTextDeliveryRetryPolicy.nextAttemptCount(
         from: attemptsRemaining
       ),
@@ -1217,35 +1304,262 @@ final class AppModel: ObservableObject {
       return
     }
 
-    let result = InputInjector.insertAtFocusedTextElement(
-      text,
-      expectedProcessIdentifier: target
-    )
-    switch result {
-    case .inserted(let method):
-      invalidateVoiceTextDelivery()
-      setStatus("识别文本已写入外部文本框（\(method)）。", log: true)
-    case .dispatched(let method):
-      invalidateVoiceTextDelivery()
-      setStatus("已向外部焦点发送\(method)；请确认文本是否出现。", log: true)
-    case .retryable(let reason):
-      guard let nextAttemptCount = VoiceTextDeliveryRetryPolicy.nextAttemptCount(
-        from: attemptsRemaining
-      ) else {
+    let snapshot: ExternalTextFocusSnapshot
+    switch focusResolution {
+    case .useCapturedFocus:
+      guard let captured = voiceInsertionFocusSnapshot,
+        captured.processIdentifier == target
+      else {
         invalidateVoiceTextDelivery()
-        setStatus("\(reason)；重试已用尽，文本保留在 Helm 中。", log: true)
+        setStatus("已捕获的外部文本目标无效；识别文本只保留在 Helm 中。", log: true)
         return
       }
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
-        self?.deliverRecognizedText(
+      snapshot = captured
+    case .recaptureCurrentExternalFocus:
+      guard
+        let recaptured = InputInjector.captureExternalTextFocus(
+          processIdentifier: target
+        )
+      else {
+        retryRecognizedTextDelivery(
           text,
+          token: token,
+          attemptsRemaining: attemptsRemaining,
+          reason: "外部文本框焦点尚未就绪"
+        )
+        return
+      }
+      voiceInsertionFocusSnapshot = recaptured
+      snapshot = recaptured
+      voiceDeliveryLogger.info(
+        "focus recapture targetPID=\(target, privacy: .public) role=\(recaptured.role, privacy: .public) subrole=\(recaptured.subrole, privacy: .public)"
+      )
+    case .retryAfterActivation, .refuse:
+      return
+    }
+    let restored = InputInjector.restoreExternalTextFocus(snapshot)
+    voiceDeliveryLogger.info(
+      "focus restore targetPID=\(target, privacy: .public) restored=\(restored, privacy: .public)"
+    )
+    guard restored else {
+      retryRecognizedTextDelivery(
+        text,
+        token: token,
+        attemptsRemaining: attemptsRemaining,
+        reason: "捕获的外部文本框未能恢复焦点"
+      )
+      return
+    }
+
+    switch InputInjector.prepareTextInsertion(text, focusSnapshot: snapshot) {
+    case .unicodeChunks(let chunks):
+      setStatus("已锁定原外部文本框，正在逐字投递…", log: true)
+      deliverUnicodeChunks(
+        chunks,
+        index: 0,
+        focusSnapshot: snapshot,
+        target: target,
+        token: token,
+        attemptsRemaining: 3
+      )
+    case .result(let result):
+      handleTextInsertionResult(
+        result,
+        text: text,
+        target: target,
+        token: token,
+        attemptsRemaining: attemptsRemaining
+      )
+    }
+  }
+
+  private func handleTextInsertionResult(
+    _ result: TextInsertionResult,
+    text: String,
+    target: Int32,
+    token: UInt64,
+    attemptsRemaining: Int
+  ) {
+    switch result {
+    case .inserted(let method):
+      voiceDeliveryLogger.info(
+        "delivery result=inserted targetPID=\(target, privacy: .public) method=\(method, privacy: .public)"
+      )
+      lastCompletedTranscript = TextInsertionPolicy.retryText(
+        after: .confirmedInsertion,
+        originalText: text
+      )
+      invalidateVoiceTextDelivery()
+      setStatus("识别文本已写入原外部文本框（\(method)）。", log: true)
+    case .dispatched(let method):
+      voiceDeliveryLogger.info(
+        "delivery result=dispatched targetPID=\(target, privacy: .public) method=\(method, privacy: .public)"
+      )
+      lastCompletedTranscript = TextInsertionPolicy.retryText(
+        after: .unconfirmedDispatch,
+        originalText: text
+      )
+      invalidateVoiceTextDelivery()
+      setStatus("已向原外部文本框发送\(method)；请确认文本是否出现。", log: true)
+    case .retryable(let reason):
+      retryRecognizedTextDelivery(
+        text,
+        token: token,
+        attemptsRemaining: attemptsRemaining,
+        reason: reason
+      )
+    case .refused(let reason):
+      voiceDeliveryLogger.info(
+        "delivery result=refused targetPID=\(target, privacy: .public) reason=\(reason, privacy: .public)"
+      )
+      invalidateVoiceTextDelivery()
+      setStatus("\(reason)；文本保留在 Helm 中。", log: true)
+    }
+  }
+
+  private func retryRecognizedTextDelivery(
+    _ text: String,
+    token: UInt64,
+    attemptsRemaining: Int,
+    reason: String
+  ) {
+    voiceDeliveryLogger.info(
+      "delivery result=retry attempts=\(attemptsRemaining, privacy: .public) reason=\(reason, privacy: .public)"
+    )
+    guard let nextAttemptCount = VoiceTextDeliveryRetryPolicy.nextAttemptCount(
+      from: attemptsRemaining
+    ) else {
+      invalidateVoiceTextDelivery()
+      setStatus("\(reason)；重试已用尽，文本保留在 Helm 中。", log: true)
+      return
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+      self?.deliverRecognizedText(
+        text,
+        token: token,
+        attemptsRemaining: nextAttemptCount
+      )
+    }
+  }
+
+  private func deliverUnicodeChunks(
+    _ chunks: [String],
+    index: Int,
+    focusSnapshot: ExternalTextFocusSnapshot,
+    target: Int32,
+    token: UInt64,
+    attemptsRemaining: Int
+  ) {
+    guard activeVoiceDeliveryToken == token, voiceDeliveryGeneration.accepts(token) else { return }
+    guard index < chunks.count else {
+      invalidateVoiceTextDelivery()
+      setStatus("识别文本已逐字投递到原外部文本框（\(chunks.count) 个字素）。", log: true)
+      return
+    }
+    guard let expectedIdentity = voiceInsertionProcessIdentity,
+      runningApplicationMatches(expectedIdentity)
+    else {
+      finishInterruptedUnicodeDelivery(
+        chunks: chunks,
+        sentCount: index,
+        reason: "外部目标进程身份无法确认"
+      )
+      return
+    }
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target else {
+      finishInterruptedUnicodeDelivery(
+        chunks: chunks,
+        sentCount: index,
+        reason: "外部应用失去前台焦点"
+      )
+      return
+    }
+
+    switch InputInjector.postUnicodeChunk(
+      chunks[index],
+      focusSnapshot: focusSnapshot
+    ) {
+    case .posted:
+      let nextIndex = index + 1
+      let remaining = UnicodeDeliveryProgress.remainingText(
+        chunks: chunks,
+        sentCount: nextIndex
+      )
+      if nextIndex == chunks.count {
+        lastCompletedTranscript = nil
+        voiceDeliveryLogger.info(
+          "delivery result=unicode-complete targetPID=\(target, privacy: .public) graphemes=\(chunks.count, privacy: .public)"
+        )
+        invalidateVoiceTextDelivery()
+        setStatus("识别文本已逐字投递到原外部文本框（\(chunks.count) 个字素）。", log: true)
+        return
+      }
+      lastCompletedTranscript = remaining
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.004) { [weak self] in
+        self?.deliverUnicodeChunks(
+          chunks,
+          index: nextIndex,
+          focusSnapshot: focusSnapshot,
+          target: target,
+          token: token,
+          attemptsRemaining: 3
+        )
+      }
+    case .retryable(let reason):
+      guard index == 0,
+        let nextAttemptCount = VoiceTextDeliveryRetryPolicy.nextAttemptCount(
+          from: attemptsRemaining
+        )
+      else {
+        finishInterruptedUnicodeDelivery(
+          chunks: chunks,
+          sentCount: index,
+          reason: reason
+        )
+        return
+      }
+      _ = InputInjector.restoreExternalTextFocus(focusSnapshot)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+        self?.deliverUnicodeChunks(
+          chunks,
+          index: index,
+          focusSnapshot: focusSnapshot,
+          target: target,
           token: token,
           attemptsRemaining: nextAttemptCount
         )
       }
     case .refused(let reason):
-      invalidateVoiceTextDelivery()
-      setStatus("\(reason)；文本保留在 Helm 中。", log: true)
+      finishInterruptedUnicodeDelivery(
+        chunks: chunks,
+        sentCount: index,
+        reason: reason
+      )
+    }
+  }
+
+  private func finishInterruptedUnicodeDelivery(
+    chunks: [String],
+    sentCount: Int,
+    reason: String
+  ) {
+    let safeSentCount = min(max(sentCount, 0), chunks.count)
+    let remaining = UnicodeDeliveryProgress.remainingText(
+      chunks: chunks,
+      sentCount: safeSentCount
+    )
+    lastCompletedTranscript = remaining.isEmpty ? nil : remaining
+    voiceDeliveryLogger.info(
+      "delivery result=partial sent=\(safeSentCount, privacy: .public) total=\(chunks.count, privacy: .public) reason=\(reason, privacy: .public)"
+    )
+    invalidateVoiceTextDelivery()
+    if safeSentCount > 0 {
+      setStatus(
+        "逐字投递已中止：已发送 \(safeSentCount)/\(chunks.count) 个字素（\(reason)）；重发只会发送剩余部分。",
+        log: true
+      )
+    } else {
+      setStatus("逐字投递未开始（\(reason)）；文本保留在 Helm 中。", log: true)
     }
   }
 
@@ -1254,12 +1568,14 @@ final class AppModel: ObservableObject {
     activeVoiceDeliveryToken = nil
     voiceInsertionTarget = nil
     voiceInsertionProcessIdentity = nil
+    voiceInsertionFocusSnapshot = nil
     if lastCompletedTranscript != nil {
       manualDeliveryActivationBaseline = focusHistory.activationGeneration
     }
   }
 
   private func emergencyStop(reason: String, announce: Bool = true) {
+    motionSamplingDriver.disableOutputAndWait()
     pendingReconnectWorkItem?.cancel()
     pendingReconnectWorkItem = nil
     pendingReconnectIdentity = nil
@@ -1286,6 +1602,7 @@ final class AppModel: ObservableObject {
     invalidateVoiceTextDelivery()
     suppressAutoInsertForCurrentVoice = false
     controlsEnabled = false
+    syncMotionConfiguration()
     safetyChordTracker.reset()
     InputInjector.endPointerSession()
     resetMotionState()
@@ -1301,10 +1618,7 @@ final class AppModel: ObservableObject {
   }
 
   private func resetMotionIntegrationState() {
-    leftStickActiveSince = nil
-    pointerFilter.reset()
-    scrollFilter.reset()
-    scrollAccumulator.reset()
+    motionSamplingDriver.requestMotionReset()
     lastTouch = nil
     lastTouchTime = nil
   }
@@ -1345,7 +1659,14 @@ final class AppModel: ObservableObject {
     }
     configureConnectedController(name: name, identity: identity, connection: connection)
     queueLatestInput("已连接 \(name)")
-    setStatus("检测到 \(name)，请检查权限后启用控制。", log: true)
+    if launchAutoEnableGate.consumeForConnection() {
+      toggleControls(promptForAccessibility: false)
+      if controlsEnabled {
+        setStatus("启动时检测到 \(name)，已按配置自动启用控制。", log: true)
+      }
+    } else {
+      setStatus("检测到 \(name)，请检查权限后启用控制。", log: true)
+    }
   }
 
   private func handleControllerDisconnected(event: HelmSDLEvent) {
@@ -1403,6 +1724,7 @@ final class AppModel: ObservableObject {
   }
 
   private func beginControllerReconnectGrace(identity: ControllerIdentity) {
+    motionSamplingDriver.disableOutputAndWait()
     if leftMouseDown {
       InputInjector.mouseButton(.left, pressed: false)
       leftMouseDown = false
@@ -1516,6 +1838,7 @@ final class AppModel: ObservableObject {
   }
 
   private func releaseInjectedInputsPreservingControlSession() {
+    motionSamplingDriver.disableOutputAndWait()
     if leftMouseDown { InputInjector.mouseButton(.left, pressed: false) }
     if rightMouseDown { InputInjector.mouseButton(.right, pressed: false) }
     leftMouseDown = false
@@ -1535,6 +1858,7 @@ final class AppModel: ObservableObject {
     if controlsEnabled, controllerConnected, accessibilityGranted {
       InputInjector.beginPointerSession()
     }
+    syncMotionConfiguration()
   }
 
   private func queueLatestInput(_ message: String) {

@@ -8,15 +8,7 @@ final class HelmUpdateController {
 
   init(bundle: Bundle = .main) {
     let info = bundle.infoDictionary ?? [:]
-    let feedURL = info["SUFeedURL"] as? String
-    let publicKey = info["SUPublicEDKey"] as? String
-    let requiresSignedFeed = info["SURequireSignedFeed"] as? Bool
-    let automaticChecks = info["SUEnableAutomaticChecks"] as? Bool
-    let configured =
-      feedURL?.hasPrefix("https://") == true
-      && publicKey?.isEmpty == false
-      && requiresSignedFeed == true
-      && automaticChecks == false
+    let configured = SparkleUpdateConfigurationPolicy.isConfigured(info: info)
     isConfigured = configured
     updaterController =
       configured

@@ -1,0 +1,195 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version from CFBundleShortVersionString, without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: helm-public-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 30
+    environment: release
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable release identity
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleShortVersionString' \
+            macos-app/Resources/Info.plist)
+          build=$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleVersion' \
+            macos-app/Resources/Info.plist)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ $build =~ ^[1-9][0-9]*$ ]]
+          [[ $REQUESTED_VERSION == "$version" ]]
+          tag="v$version"
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            echo "Tag already exists: $tag" >&2
+            exit 1
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists: $tag" >&2
+            exit 1
+          fi
+          printf 'VERSION=%s\nTAG=%s\nBUILD=%s\n' "$version" "$tag" "$build" \
+            >> "$GITHUB_ENV"
+
+      - name: Fetch hash-pinned frameworks and Sparkle tools
+        run: |
+          set -euo pipefail
+          sdl_version=$(tr -d '[:space:]' < macos-app/ThirdParty/SDL.version)
+          sdl_hash=$(tr -d '[:space:]' < macos-app/ThirdParty/SDL.sha256)
+          sparkle_version=$(tr -d '[:space:]' < macos-app/ThirdParty/Sparkle.version)
+          sparkle_hash=$(tr -d '[:space:]' < macos-app/ThirdParty/Sparkle.sha256)
+          sdl_archive="$RUNNER_TEMP/SDL3.dmg"
+          sparkle_archive="$RUNNER_TEMP/Sparkle.tar.xz"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+            "https://github.com/libsdl-org/SDL/releases/download/release-$sdl_version/SDL3-$sdl_version.dmg" \
+            -o "$sdl_archive"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+            "https://github.com/sparkle-project/Sparkle/releases/download/$sparkle_version/Sparkle-$sparkle_version.tar.xz" \
+            -o "$sparkle_archive"
+          printf '%s  %s\n' "$sdl_hash" "$sdl_archive" | shasum -a 256 -c -
+          printf '%s  %s\n' "$sparkle_hash" "$sparkle_archive" | shasum -a 256 -c -
+
+          sparkle_dir="$RUNNER_TEMP/sparkle-distribution"
+          mkdir -p "$sparkle_dir" macos-app/.vendor
+          tar -xf "$sparkle_archive" -C "$sparkle_dir"
+          ditto "$sparkle_dir/Sparkle.framework" macos-app/.vendor/Sparkle.framework
+          ditto "$sparkle_dir/LICENSE" macos-app/.vendor/Sparkle-LICENSE.txt
+
+          mount_dir=$(mktemp -d "$RUNNER_TEMP/helm-sdl.XXXXXX")
+          cleanup_sdl() { hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; }
+          trap cleanup_sdl EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$sdl_archive"
+          ditto "$mount_dir/SDL3.xcframework/macos-arm64_x86_64/SDL3.framework" \
+            macos-app/.vendor/SDL3.framework
+          hdiutil detach "$mount_dir"
+          trap - EXIT
+
+      - name: Verify release monotonicity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n $SPARKLE_PRIVATE_KEY ]]
+          release_json=$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --limit 100 \
+            --json tagName,isDraft,isPrerelease,publishedAt)
+          previous_tag=$(printf '%s' "$release_json" | python3 -c '
+          import json, sys
+          releases = [
+              item for item in json.load(sys.stdin)
+              if not item["isDraft"] and not item["isPrerelease"]
+          ]
+          releases.sort(key=lambda item: item["publishedAt"] or "")
+          print(releases[-1]["tagName"] if releases else "")
+          ')
+          if [[ -z $previous_tag ]]; then
+            echo "No published predecessor; validating the first release."
+            exit 0
+          fi
+
+          previous_dir="$RUNNER_TEMP/previous-release"
+          mkdir -p "$previous_dir"
+          gh release download "$previous_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern appcast.xml \
+            --dir "$previous_dir"
+          previous_appcast="$previous_dir/appcast.xml"
+          test -s "$previous_appcast"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+            "$RUNNER_TEMP/sparkle-distribution/bin/sign_update" \
+              --ed-key-file - \
+              --verify \
+              "$previous_appcast" >/dev/null
+          previous_build=$(python3 - "$previous_appcast" <<'PY'
+          import sys
+          from xml.etree import ElementTree as ET
+
+          namespace = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+          root = ET.parse(sys.argv[1]).getroot()
+          versions = []
+          for element in root.iter(f"{{{namespace}}}version"):
+              value = (element.text or "").strip()
+              if not value.isdecimal():
+                  raise SystemExit("previous appcast has an invalid build version")
+              versions.append(int(value))
+          if not versions:
+              raise SystemExit("previous appcast has no build version")
+          print(max(versions))
+          PY
+          )
+          if (( BUILD <= previous_build )); then
+            echo "Current build $BUILD must be greater than latest published build $previous_build." >&2
+            exit 1
+          fi
+
+      - name: Build and verify app
+        run: macos-app/scripts/build-and-install.sh
+
+      - name: Package and sign Sparkle feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n $SPARKLE_PRIVATE_KEY ]]
+          release_dir="$RUNNER_TEMP/helm-release"
+          archive="$release_dir/Helm-Demo-$VERSION.zip"
+          mkdir -p "$release_dir"
+          ditto -c -k --sequesterRsrc --keepParent \
+            'macos-app/.build/Helm Demo.app' "$archive"
+          printf 'Helm %s (build %s)\n' "$VERSION" "$BUILD" \
+            > "$release_dir/Helm-Demo-$VERSION.md"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+            "$RUNNER_TEMP/sparkle-distribution/bin/generate_appcast" \
+              --ed-key-file - \
+              --download-url-prefix \
+                "https://github.com/tonycoder-hub/helm-dualsense/releases/download/$TAG/" \
+              --embed-release-notes \
+              --maximum-versions 1 \
+              "$release_dir"
+          test -s "$release_dir/appcast.xml"
+          (
+            cd "$release_dir"
+            shasum -a 256 "$(basename "$archive")" appcast.xml \
+              > SHA256SUMS
+          )
+          printf 'RELEASE_DIR=%s\nARCHIVE=%s\n' "$release_dir" "$archive" \
+            >> "$GITHUB_ENV"
+
+      - name: Publish immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            "$ARCHIVE" \
+            "$RELEASE_DIR/appcast.xml" \
+            "$RELEASE_DIR/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Helm $VERSION" \
+            --generate-notes

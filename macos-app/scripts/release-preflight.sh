@@ -164,6 +164,12 @@ fi
 feed_url=$(helm_bundle_value "$plist" SUFeedURL || true)
 public_key=$(helm_bundle_value "$plist" SUPublicEDKey || true)
 signed_feed=$(helm_bundle_value "$plist" SURequireSignedFeed || true)
+verify_before_extraction=$(
+    helm_bundle_value "$plist" SUVerifyUpdateBeforeExtraction || true
+)
+signed_feed_failure_expiration=$(
+    helm_bundle_value "$plist" SUSignedFeedFailureExpirationInterval || true
+)
 automatic_checks=$(helm_bundle_value "$plist" SUEnableAutomaticChecks || true)
 sparkle_framework="$project_root/macos-app/.vendor/Sparkle.framework"
 sparkle_binary="$sparkle_framework/Versions/B/Sparkle"
@@ -214,10 +220,12 @@ else
 fi
 
 if [[ $feed_url_valid == true && -n $public_key && $signed_feed == "true" \
+    && $verify_before_extraction == "true" \
+    && $signed_feed_failure_expiration == "0" \
     && $automatic_checks == "false" ]]; then
-    pass_gate sparkle_feed "signed HTTPS updates are configured with background checks initially disabled"
+    pass_gate sparkle_feed "signed HTTPS updates are verified before extraction, fail closed permanently, and keep background checks disabled"
 else
-    block_gate sparkle_feed "configure the signed production feed and keep automatic checks disabled for initial releases"
+    block_gate sparkle_feed "require the signed production feed, pre-extraction verification, non-expiring signature failures, and disabled automatic checks"
 fi
 
 history_anchor=$(helm_tracked_regular_file_value \

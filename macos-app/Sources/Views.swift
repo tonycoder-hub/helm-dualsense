@@ -64,7 +64,7 @@ struct ControlCenterView: View {
           .foregroundStyle(.secondary)
       }
       Spacer()
-      Text("DEMO 0.9.2")
+          Text("DEMO 0.10.0")
         .font(.caption.weight(.bold))
         .foregroundStyle(helmAccent)
         .padding(.horizontal, 10)
@@ -106,7 +106,7 @@ struct ControlCenterView: View {
             .font(.callout)
             .foregroundStyle(.secondary)
             .lineLimit(2)
-          Text("普通连接默认停用；有线手柄因 USB 音频短暂重枚举时会自动恢复。\(model.safetyChordLabel) 是紧急停止手势。")
+          Text("启动自动启用只在启动时消费一次；手动停止后不会被普通重连重新打开。\(model.safetyChordLabel) 是紧急停止手势。")
             .font(.caption)
             .foregroundStyle(.tertiary)
         }
@@ -124,6 +124,13 @@ struct ControlCenterView: View {
         .tint(model.controlsEnabled ? .red : helmAccent)
       }
 
+      Toggle(
+        "启动时已连接手柄则自动启用",
+        isOn: $model.autoEnableControlsOnLaunch
+      )
+      .toggleStyle(.switch)
+      .controlSize(.small)
+
       Divider().opacity(0.35)
 
       HStack(spacing: 22) {
@@ -140,22 +147,28 @@ struct ControlCenterView: View {
           display: String(format: "%.0f", model.scrollGain)
         )
         VStack(alignment: .leading, spacing: 6) {
-          Text("输入轮询率")
+          Text("固定控制频率")
             .font(.caption)
             .foregroundStyle(.secondary)
-          Picker("输入轮询率", selection: $model.inputPollingRate) {
-            ForEach(InputCadencePolicy.selectableRates, id: \.self) { rate in
-              Text("\(Int(rate)) Hz").tag(rate)
-            }
+          HStack(spacing: 7) {
+            Text("240 Hz")
+              .font(.headline.monospacedDigit())
+            Text("已锁定")
+              .font(.caption2.weight(.semibold))
+              .padding(.horizontal, 7)
+              .padding(.vertical, 3)
+              .background(helmAccent.opacity(0.14), in: Capsule())
           }
-          .labelsHidden()
           Text(
             model.measuredInputRate > 0
-              ? "实测 \(Int(model.measuredInputRate.rounded())) Hz"
+              ? "采样 \(Int(model.measuredInputRate.rounded())) Hz · \(model.outputCadenceLabel) \(Int(model.measuredDisplayRate.rounded())) Hz"
               : model.inputCadenceLabel
           )
           .font(.caption.monospacedDigit())
           .foregroundStyle(helmAccent)
+          Text(model.inputJitterLabel)
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
         }
       }
     }

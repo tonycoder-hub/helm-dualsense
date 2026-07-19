@@ -215,6 +215,12 @@ embedded_version=$(helm_bundle_value "$sparkle_framework/Versions/B/Resources/In
 feed_url=$(helm_bundle_value "$plist" SUFeedURL || true)
 public_key=$(helm_bundle_value "$plist" SUPublicEDKey || true)
 signed_feed=$(helm_bundle_value "$plist" SURequireSignedFeed || true)
+verify_before_extraction=$(
+    helm_bundle_value "$plist" SUVerifyUpdateBeforeExtraction || true
+)
+signed_feed_failure_expiration=$(
+    helm_bundle_value "$plist" SUSignedFeedFailureExpirationInterval || true
+)
 automatic_checks=$(helm_bundle_value "$plist" SUEnableAutomaticChecks || true)
 linked_frameworks=$(otool -L "$main_executable" 2>/dev/null || true)
 update_urls_ok=false
@@ -276,6 +282,8 @@ if [[ $pinned_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ \
     && $embedded_version == "$pinned_version" \
     && $sparkle_content_ok == true \
     && -n $public_key && $signed_feed == "true" \
+    && $verify_before_extraction == "true" \
+    && $signed_feed_failure_expiration == "0" \
     && $automatic_checks == "false" \
     && $linked_frameworks == *"Sparkle.framework"* \
     && $linked_frameworks == *"SDL3.framework"* \

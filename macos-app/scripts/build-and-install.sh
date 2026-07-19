@@ -37,6 +37,9 @@ xcrun swiftc \
     -target "$architecture-apple-macos14.0" \
     "$source_dir/ControlMath.swift" \
     "$source_dir/ContinuousScrollEvent.swift" \
+    "$source_dir/DisplaySynchronizedMotion.swift" \
+    "$source_dir/PointerEventFactory.swift" \
+    "$source_dir/UnicodeKeyboardEventFactory.swift" \
     "$source_dir/ControllerMapping.swift" \
     "$source_dir/AudioInputCatalog.swift" \
     "$source_dir/PermissionDiagnostics.swift" \
@@ -44,6 +47,7 @@ xcrun swiftc \
     "$source_dir/ExternalFocusHistory.swift" \
     "$source_dir/HapticFeedback.swift" \
     "$source_dir/MappingLayoutPolicy.swift" \
+    "$source_dir/SparkleUpdateConfiguration.swift" \
     "$app_root/Tests/main.swift" \
     -framework AVFoundation \
     -framework AppKit \
@@ -63,6 +67,39 @@ xcrun swiftc \
     "$app_root/Tests/InputCadenceTests.swift" \
     -o "$build_dir/InputCadenceTests"
 "$build_dir/InputCadenceTests"
+
+xcrun swiftc \
+    -swift-version 5 \
+    -warnings-as-errors \
+    -parse-as-library \
+    -sdk "$sdk" \
+    -target "$architecture-apple-macos14.0" \
+    "$source_dir/ControlMath.swift" \
+    "$source_dir/InputCadenceDriver.swift" \
+    "$app_root/Tests/BackgroundCadenceIntegrationTests.swift" \
+    -framework AppKit \
+    -o "$build_dir/BackgroundCadenceIntegrationTests"
+"$build_dir/BackgroundCadenceIntegrationTests"
+
+xcrun swiftc \
+    -swift-version 5 \
+    -warnings-as-errors \
+    -parse-as-library \
+    -sdk "$sdk" \
+    -target "$architecture-apple-macos14.0" \
+    "$source_dir/ControlMath.swift" \
+    "$source_dir/ContinuousScrollEvent.swift" \
+    "$source_dir/ControllerMapping.swift" \
+    "$source_dir/AudioInputCatalog.swift" \
+    "$source_dir/InputCadenceDriver.swift" \
+    "$source_dir/MotionSamplingDriver.swift" \
+    "$app_root/Tests/MotionSamplingDriverTests.swift" \
+    -framework AppKit \
+    -framework AVFoundation \
+    -framework CoreAudio \
+    -framework CoreGraphics \
+    -o "$build_dir/MotionSamplingDriverTests"
+"$build_dir/MotionSamplingDriverTests"
 
 bash "$app_root/Tests/local-update-identity-tests.sh"
 bash "$app_root/Tests/in-place-install-tests.sh"
@@ -91,10 +128,26 @@ xcrun clang \
     "$app_root/Tests/HelmBridgeAnalogIntegrationTests.c" \
     -framework SDL3 \
     -framework Carbon \
-    -framework CoreVideo \
     -o "$build_dir/HelmBridgeAnalogIntegrationTests"
 DYLD_FRAMEWORK_PATH="$(dirname "$vendor_framework")" \
     "$build_dir/HelmBridgeAnalogIntegrationTests"
+
+xcrun clang \
+    -std=c11 \
+    -Wall \
+    -Wextra \
+    -Werror \
+    -arch "$architecture" \
+    -mmacosx-version-min=14.0 \
+    -I "$source_dir" \
+    -F "$(dirname "$vendor_framework")" \
+    "$build_dir/HelmBridge.o" \
+    "$app_root/Tests/HelmBridgeConcurrencyIntegrationTests.c" \
+    -framework SDL3 \
+    -framework Carbon \
+    -o "$build_dir/HelmBridgeConcurrencyIntegrationTests"
+DYLD_FRAMEWORK_PATH="$(dirname "$vendor_framework")" \
+    "$build_dir/HelmBridgeConcurrencyIntegrationTests"
 
 swift_sources=("$source_dir"/*.swift)
 xcrun swiftc \
@@ -116,7 +169,6 @@ xcrun swiftc \
     -framework Carbon \
     -framework CoreAudio \
     -framework CoreGraphics \
-    -framework CoreVideo \
     -framework Speech \
     -Xlinker -rpath \
     -Xlinker @executable_path/../Frameworks \

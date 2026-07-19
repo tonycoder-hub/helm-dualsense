@@ -1,18 +1,50 @@
-# Formal release and updates
+# Release and updates
 
-Helm 0.6 remains a local, ad-hoc-signed Demo. A formal release must not be
-published until `macos-app/scripts/release-preflight.sh` reports
-`RELEASE_PREFLIGHT=PASS` from a clean, reviewed commit.
+Helm has two deliberately separate release tracks:
 
-## Release boundary
+- **Public Demo:** a manually dispatched GitHub Release built from protected
+  `main`. It publishes an ad-hoc-signed `Helm Demo.app` ZIP, a Sparkle-signed
+  appcast, and SHA-256 manifest. It is suitable for testing, but it is neither
+  Developer ID signed nor notarized.
+- **Formal distribution:** the future `Helm.app` product. It must not be
+  published until `macos-app/scripts/release-preflight.sh` reports
+  `RELEASE_PREFLIGHT=PASS` from a clean, reviewed commit and every signing,
+  notarization, and history gate below passes.
+
+## Public Demo release capability
+
+`.github/workflows/release.yml` is the only repository workflow allowed to
+publish the Demo channel. It is manual, runs only from `main`, has only
+`contents: write`, and is bound to the protected `release` environment. The
+environment holds the dedicated Sparkle private key; pull-request verification
+has read-only repository access and cannot read that secret.
+
+The workflow verifies the tracked SDL and Sparkle archive hashes, runs the full
+Demo build and test path, cryptographically verifies the latest published
+appcast, rejects a non-increasing build number, passes the signing key to
+Sparkle over standard input, and publishes immutable versioned assets through
+GitHub Releases. The appcast
+enclosure uses the versioned release URL while the app reads the stable
+`releases/latest/download/appcast.xml` URL. Background update checks remain
+disabled, so users initiate checks explicitly.
+
+Repository governance requires pull requests plus both the `release-contract`
+and full `core-build` checks for normal changes to `main`, resolves review
+conversations before merging, enforces linear history, applies rules to
+administrators, and blocks force pushes and branch deletion. The release
+environment accepts deployments only from protected branches. A one-time bootstrap push may be required before these
+rules can refer to the new workflow; protection is enabled immediately after
+that bootstrap.
+
+## Formal release boundary
 
 The first supported release should be an Apple-silicon `Helm.app` with a stable
 bundle identifier and executable name. Renaming `Helm Demo.app` is an explicit
 one-time boundary; update artifacts must keep the formal name afterward.
 
-The local development installer stays separate from the formal release path.
-It may use an ad-hoc signature, but no artifact from that path is eligible for
-GitHub Releases or an update feed.
+The local development installer and public Demo workflow stay separate from the
+formal release path. Both may use the stable ad-hoc Demo identity, but neither
+artifact is eligible to be represented as the notarized formal product.
 
 ## Required gates
 
@@ -66,10 +98,10 @@ The script never prints a credential value. Store notarization credentials in
 the Keychain with `xcrun notarytool store-credentials`, then pass only the
 profile name to the process.
 
-The pinned Sparkle 2.9.4 framework is already linked and embedded in development
-builds, but its controller is not started without all production feed keys. The
-Demo intentionally has no `SUFeedURL` or public key and never contacts a
-placeholder feed.
+The pinned Sparkle 2.9.4 framework is linked and embedded in development builds.
+The Demo includes the dedicated public key, stable GitHub Releases feed URL,
+signed-feed requirement, and visible manual update action. Its private signing
+key is never embedded in the app or repository.
 
 ## First two releases: manual and fail-closed
 
@@ -136,7 +168,10 @@ and reject a dirty tree or post-review replacement.
 - Use `SPUStandardUpdaterController` and a visible, user-initiated “Check for
   Updates” action before enabling background checks.
 - Set `SUFeedURL` to an HTTPS stable-channel appcast, add `SUPublicEDKey`, and
-  require a signed feed with `SURequireSignedFeed`. Keep
+  require a signed feed with `SURequireSignedFeed`. Also require
+  `SUVerifyUpdateBeforeExtraction` and set
+  `SUSignedFeedFailureExpirationInterval` to `0`, so a signing failure cannot
+  age into an unsigned fallback. Keep
   `SUEnableAutomaticChecks` false for the first two releases so checking remains
   an explicit user action.
 - Feed and enclosure URLs use a deliberately narrow canonical HTTPS profile:
@@ -148,8 +183,10 @@ and reject a dirty tree or post-review replacement.
 - Appcast build and EdDSA attributes must use the canonical Sparkle namespace
   `http://www.andymatuschak.org/xml-namespaces/sparkle`. Conflicting attributes
   with the same local names in any other namespace are rejected.
-- Keep the EdDSA private key in the release Mac's Keychain. Never commit it or
-  place it in an untrusted pull-request workflow.
+- Keep the formal EdDSA private key in the release Mac's Keychain. Keep the
+  separate Demo key only in its local Keychain and the protected GitHub
+  `release` environment. Never commit either key or expose one to a pull-request
+  workflow.
 - Treat adaptive-trigger experiments and update delivery as separate trust
   domains; controller input must never influence feed URLs or release paths.
 
@@ -168,9 +205,11 @@ match the tracked reviewed SHA-256 anchor.
 
 ## Automation and rollback
 
-CI is intentionally keyless: it can lint metadata and exercise the fail-closed
-preflight contract, but it cannot sign, notarize, edit the appcast, or publish a
-release. Automation may be expanded only after two successful manual releases.
+Pull-request CI is intentionally keyless: it can lint metadata and exercise the
+fail-closed contracts, but it cannot sign or publish. The separately authorized,
+manual Demo workflow can sign its Sparkle feed and publish GitHub Release assets
+from protected `main`; it cannot Developer ID sign or notarize. Formal release
+automation remains blocked until the formal gates pass.
 
 Tags and published artifacts are immutable. If a release is faulty, preserve
 it for audit, remove it from the active appcast, and ship a higher-version fixed

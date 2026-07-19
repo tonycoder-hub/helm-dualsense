@@ -13,7 +13,9 @@ for push-to-talk transcription.
    controller report-mode change before the app actually needs it.
 3. In Helm, grant Accessibility, Microphone, and Speech Recognition only when
    you are ready to test them.
-4. Click **Enable Controls**. The app always starts disabled.
+4. If the controller was already connected when Helm launched, controls enable
+   automatically by default after Accessibility is available. Turn off the
+   launch toggle if you prefer an explicit **Enable Controls** click.
 5. Use the left stick for the main pointer, the touchpad for precision, and
    Cross/Circle for click or hold-to-drag. The right stick scrolls, D-pad pages,
    and the microphone button controls PTT. L2 brakes pointer/scroll speed and R2
@@ -28,11 +30,11 @@ input methods, including held Command/Control/Option/Shift-only mappings with
 independent left/right physical modifier selection. Mapping capture suppresses
 desktop injection while recording but keeps the controller and enabled control
 session connected.
-The current analog state is actively sampled at a configurable 60–240 Hz
-(240 Hz by default) instead of relying on per-axis SDL event frequency.
+The current analog state is actively sampled at a fixed 240 Hz instead of
+relying on per-axis SDL event frequency.
 The default curve now uses a low-latency radial response floor and 6 ms
-smoothing; fractional continuous-pixel scrolling starts on the first sampled
-frame instead of waiting for an integer pixel. The response, smoothing, smooth
+smoothing; fractional continuous-pixel scrolling accumulates into evenly
+spaced symmetric point events without a startup spike. The response, smoothing, smooth
 hold-to-accelerate curve, and racing-style trigger speed multipliers remain
 configurable and are persisted locally.
 
@@ -48,11 +50,16 @@ application before committing text. If that focus cannot be restored and
 confirmed within 0.5 seconds, transcription is retained in Helm and automatic
 insertion is suppressed. Text insertion first uses the focused
 Accessibility element and falls back to Unicode keyboard events only after the
-focused element PID matches the target captured at PTT start, including web
+focused element PID matches the process identity captured at PTT start,
+including web
 editors that expose generic AX roles. The physical PTT path keeps that captured
 target for the whole recognition session, revalidates it immediately before
 delivery, then uses a global HID Unicode event so web/Electron editors receive
 the same route as normal keyboard input.
+If UI PTT could not capture an AX element while Helm was frontmost, completion
+reactivates the exact original process and recaptures its current focused text
+element; it never substitutes another process or replaces a valid earlier
+snapshot.
 Unicode event delivery is shown as unconfirmed because a target
 application may ignore it. Secure fields and system secure-input mode are
 refused. It never uses the clipboard as a hidden fallback.
@@ -88,7 +95,7 @@ macos-app/scripts/build-and-install.sh --launch
 
 The script runs the pure mapping tests and an isolated SDL virtual-gamepad
 analog-read integration test, builds with the installed Command Line Tools,
-embeds SDL3 and inactive pinned Sparkle, applies an ad-hoc signature with
+embeds SDL3 and pinned Sparkle, applies an ad-hoc signature with
 a stable local designated requirement, verifies the bundle, preserves the
 top-level app directory while transactionally replacing only its `Contents`,
 and keeps one installed copy in `~/Applications`. The first migration from an older ad-hoc
@@ -99,8 +106,12 @@ requirement, and all three privacy statuses remained authorized after every
 relaunch. Formal releases do not use this local identity, so that result must
 not be generalized to Developer ID distribution.
 
-This development installer cannot create a public release. The separate
-fail-closed readiness check is:
+The manual GitHub **Release** workflow creates the public Demo ZIP, signed
+Sparkle appcast, and portable SHA-256 manifest from `main`. It verifies the
+latest signed appcast and refuses a non-increasing build number. It uses a
+dedicated protected `release` environment and its environment-scoped signing secret. This public
+Demo remains ad-hoc signed and is separate from the fail-closed formal readiness
+check:
 
 ```bash
 HELM_SDL_ARCHIVE=/tmp/SDL3-3.4.12.dmg \
@@ -130,8 +141,11 @@ printable ASCII, a lowercase validated DNS name or canonical IP literal, no
 credentials or fragment, and no whitespace, forbidden raw delimiters, or
 malformed percent escape. The release scripts report these as explicit gates.
 
-The Demo intentionally omits `SUFeedURL` and `SUPublicEDKey`. Its visible update
-status therefore remains disabled and it never contacts a placeholder feed.
+The Demo includes `SUFeedURL`, `SUPublicEDKey`, signed-feed enforcement,
+pre-extraction verification, and non-expiring signature failures for the GitHub
+Releases channel. Automatic background checks remain disabled;
+users initiate checks explicitly in Helm. Before the first GitHub Release is
+published, the stable `latest` feed URL can return no feed.
 After a formal artifact is produced, verify it with the ZIP, current signed
 appcast, and the exact prior signed appcast archived with the preceding
 immutable release:

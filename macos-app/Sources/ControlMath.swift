@@ -66,18 +66,33 @@ enum TimerGapPolicy {
 }
 
 enum InputCadencePolicy {
-  static let minimumRate = 60.0
-  static let maximumRate = 240.0
-  static let defaultRate = 240.0
-  static let selectableRates = [60.0, 90.0, 120.0, 144.0, 240.0]
+  static let fixedRate = 240.0
+  static let minimumRate = fixedRate
+  static let maximumRate = fixedRate
+  static let defaultRate = fixedRate
+  static let selectableRates = [fixedRate]
 
   static func clampedRate(_ rate: Double) -> Double {
-    min(max(rate, minimumRate), maximumRate)
+    fixedRate
   }
 
   static func interval(for rate: Double) -> TimeInterval {
     1.0 / clampedRate(rate)
   }
+}
+
+enum MotionOutputCadenceMode: Equatable {
+  case fixed240
+}
+
+enum MotionOutputDeliveryRoute: Equatable {
+  case immediate
+}
+
+enum MotionOutputCadencePolicy {
+  static let mode = MotionOutputCadenceMode.fixed240
+  static let fixedRate = InputCadencePolicy.fixedRate
+  static let deliveryRoute = MotionOutputDeliveryRoute.immediate
 }
 
 enum ControlMath {

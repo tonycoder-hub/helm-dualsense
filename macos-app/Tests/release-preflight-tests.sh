@@ -82,10 +82,10 @@ cp "$test_dir/../Sources/SparkleUpdater.swift" \
 cp "$test_dir/../scripts/build-and-install.sh" \
     "$fixture_project/macos-app/scripts/"
 fixture_plist="$fixture_project/macos-app/Resources/Info.plist"
-plutil -insert SUFeedURL -string 'https://exa mple.com/path' "$fixture_plist"
-plutil -insert SUPublicEDKey -string test-public-key "$fixture_plist"
-plutil -insert SURequireSignedFeed -bool YES "$fixture_plist"
-plutil -insert SUEnableAutomaticChecks -bool NO "$fixture_plist"
+plutil -replace SUFeedURL -string 'https://exa mple.com/path' "$fixture_plist"
+plutil -replace SUPublicEDKey -string test-public-key "$fixture_plist"
+plutil -replace SURequireSignedFeed -bool YES "$fixture_plist"
+plutil -replace SUEnableAutomaticChecks -bool NO "$fixture_plist"
 set +e
 malformed_feed_output=$(
     "$fixture_project/macos-app/scripts/release-preflight.sh" 2>&1
@@ -166,7 +166,7 @@ grep -q 'RELEASE_ARTIFACT=BLOCKED' <<<"$artifact_output"
 fixture_app="$fixture_dir/Helm.app"
 mkdir -p "$fixture_app/Contents"
 cp "$test_dir/../Resources/Info.plist" "$fixture_app/Contents/Info.plist"
-plutil -insert SUFeedURL -string 'https://example.com/appcast.xml' \
+plutil -replace SUFeedURL -string 'https://example.com/appcast.xml' \
     "$fixture_app/Contents/Info.plist"
 set +e
 malformed_update_output=$(HELM_EXPECTED_UPDATE_URL='https://example.com#' \
