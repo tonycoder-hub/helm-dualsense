@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL.h>
 #include <pthread.h>
+#include <pthread/qos.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,6 +29,7 @@ static void record_maximum_gap(SamplerContext *context, Uint64 gap_ns) {
 
 static void *sample_analog_state(void *raw_context) {
     SamplerContext *context = raw_context;
+    (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     const Uint64 interval_ns = 1000000000ULL / 240ULL;
     Uint64 next_deadline = SDL_GetTicksNS();
     Uint64 previous_sample_at = 0;
