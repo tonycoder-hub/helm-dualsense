@@ -124,6 +124,28 @@ let decodedMapping = try! JSONDecoder().decode(ControllerMapping.self, from: map
 expect(decodedMapping == .standard, "controller mapping should persist losslessly")
 expect(ControlMath.maximumTimerGap == 0.250, "timer-gap contract changed unexpectedly")
 
+func testInputAndMotionOutputCadenceAreLockedTo240Hz() {
+  expect(
+    InputCadencePolicy.clampedRate(60) == 240
+      && InputCadencePolicy.clampedRate(1_000) == 240,
+    "every requested input rate must resolve to the fixed 240 Hz cadence"
+  )
+  expect(
+    InputCadencePolicy.selectableRates == [240],
+    "the UI must not advertise lower cadence options after lock mode is enabled"
+  )
+  expect(
+    MotionOutputCadencePolicy.mode == .fixed240,
+    "global pointer and scroll delivery must bypass background-throttled display links"
+  )
+  expect(
+    MotionOutputCadencePolicy.deliveryRoute == .immediate,
+    "fixed 240 Hz motion must flush on the sampling tick without a display-link dependency"
+  )
+}
+
+testInputAndMotionOutputCadenceAreLockedTo240Hz()
+
 func testIsolatedInputAvoidsBluetoothDefault() {
   let bluetooth = AudioInputDevice(
     id: 101,
@@ -179,7 +201,8 @@ func testTextAreaFallsBackToUnicodeKeyboardEvents() {
     secureInputEnabled: false,
     secureField: false,
     focusedRole: "AXTextArea",
-    selectedTextSettable: false
+    selectedTextSettable: false,
+    selectedTextStateReadable: false
   )
   expect(
     decision == .unicodeKeyboardEvents,
@@ -194,7 +217,8 @@ func testSecureInputRefusesEveryInsertionPath() {
     secureInputEnabled: true,
     secureField: false,
     focusedRole: "AXTextArea",
-    selectedTextSettable: true
+    selectedTextSettable: true,
+    selectedTextStateReadable: true
   )
   expect(decision == .refused, "secure input must block AX and keyboard insertion")
 }
@@ -206,7 +230,8 @@ func testSecureFieldRefusesEveryInsertionPath() {
     secureInputEnabled: false,
     secureField: true,
     focusedRole: "AXTextField",
-    selectedTextSettable: true
+    selectedTextSettable: true,
+    selectedTextStateReadable: true
   )
   expect(decision == .refused, "secure text fields must block AX and keyboard insertion")
 }
@@ -218,7 +243,8 @@ func testWritableSelectedTextUsesAccessibilityInsertion() {
     secureInputEnabled: false,
     secureField: false,
     focusedRole: "AXTextArea",
-    selectedTextSettable: true
+    selectedTextSettable: true,
+    selectedTextStateReadable: true
   )
   expect(
     decision == .accessibilitySelectedText,
@@ -227,6 +253,23 @@ func testWritableSelectedTextUsesAccessibilityInsertion() {
 }
 
 testWritableSelectedTextUsesAccessibilityInsertion()
+
+func testUnreadableWebEditorSkipsUnverifiableAccessibilityWrite() {
+  let decision = TextInsertionPolicy.decision(
+    secureInputEnabled: false,
+    secureField: false,
+    focusedRole: "AXTextArea",
+    selectedTextSettable: true,
+    selectedTextStateReadable: false,
+    confirmedExternalTarget: true
+  )
+  expect(
+    decision == .unicodeKeyboardEvents,
+    "an unreadable web editor must use keyboard delivery instead of stopping after an unverifiable AX write"
+  )
+}
+
+testUnreadableWebEditorSkipsUnverifiableAccessibilityWrite()
 
 func testUnicodeFallbackIsReportedAsUnconfirmedDispatch() {
   expect(
@@ -243,6 +286,7 @@ func testConfirmedExternalWebEditorUsesUnicodeDelivery() {
     secureField: false,
     focusedRole: "AXGroup",
     selectedTextSettable: false,
+    selectedTextStateReadable: false,
     confirmedExternalTarget: true
   )
   expect(
@@ -252,6 +296,169 @@ func testConfirmedExternalWebEditorUsesUnicodeDelivery() {
 }
 
 testConfirmedExternalWebEditorUsesUnicodeDelivery()
+
+func testPointerEventCarriesHardwareMotionMetadata() {
+  let origin = CGPoint(x: 100, y: 100)
+  guard let event = PointerEventFactory.make(
+    origin: origin,
+    delta: CGPoint(x: 0.25, y: -0.25),
+    displayBounds: [CGRect(x: 0, y: 0, width: 1_000, height: 1_000)],
+    mouseType: .mouseMoved,
+    mouseButton: .left
+  ) else {
+    expect(false, "the HID pointer event should be constructible")
+    return
+  }
+  expect(
+    event.getIntegerValueField(.eventSourceStateID)
+      == Int64(CGEventSourceStateID.hidSystemState.rawValue),
+    "gamepad pointer events must use the HID system state"
+  )
+  expect(
+    event.getIntegerValueField(.mouseEventDeltaX) == 1
+      && event.getIntegerValueField(.mouseEventDeltaY) == -1,
+    "fractional absolute movement must still advertise nonzero hardware delta velocity"
+  )
+  expect(
+    event.flags.contains(.maskNonCoalesced),
+    "each display-frame pointer event must remain non-coalesced"
+  )
+  expect(
+    abs(event.location.x - 100.25) < 0.000_001
+      && abs(event.location.y - 99.75) < 0.000_001,
+    "hardware metadata must not quantize the precise absolute target"
+  )
+}
+
+testPointerEventCarriesHardwareMotionMetadata()
+
+func testPointerButtonsShareTheHardwareEventState() {
+  guard let event = PointerEventFactory.makeButtonEvent(
+    location: CGPoint(x: 100, y: 100),
+    button: .left,
+    pressed: true
+  ) else {
+    expect(false, "the HID pointer button event should be constructible")
+    return
+  }
+  expect(
+    event.type == .leftMouseDown
+      && event.getIntegerValueField(.eventSourceStateID)
+        == Int64(CGEventSourceStateID.hidSystemState.rawValue),
+    "pointer movement and button state must share the HID system state"
+  )
+}
+
+testPointerButtonsShareTheHardwareEventState()
+
+func testUnicodeKeyboardEventsUseHardwareEventState() {
+  guard let pair = UnicodeKeyboardEventFactory.make(chunk: "你") else {
+    expect(false, "Unicode HID events should be constructible")
+    return
+  }
+  let expectedState = Int64(CGEventSourceStateID.hidSystemState.rawValue)
+  expect(
+    pair.keyDown.getIntegerValueField(.eventSourceStateID) == expectedState
+      && pair.keyUp.getIntegerValueField(.eventSourceStateID) == expectedState,
+    "controller-originated Unicode text must use the HID system event state"
+  )
+  expect(
+    pair.keyDown.type == .keyDown && pair.keyUp.type == .keyUp,
+    "Unicode delivery must preserve one complete down/up pair"
+  )
+  expect(
+    pair.keyDown.flags.isEmpty && pair.keyUp.flags.isEmpty,
+    "recognized text events must not inherit a held Command, Option, Control, or Shift key"
+  )
+}
+
+testUnicodeKeyboardEventsUseHardwareEventState()
+
+func testFocusedElementResolutionPrefersTheSystemWideEditor() {
+  expect(
+    TextInsertionPolicy.focusedElementSource(
+      expectedProcessIdentifier: 42,
+      systemWideProcessIdentifier: 42,
+      applicationProcessIdentifier: 42,
+      allowsApplicationFallback: false
+    ) == .systemWide,
+    "the system-wide focused element is the authoritative live editor"
+  )
+  expect(
+    TextInsertionPolicy.focusedElementSource(
+      expectedProcessIdentifier: 42,
+      systemWideProcessIdentifier: 10,
+      applicationProcessIdentifier: 42,
+      allowsApplicationFallback: false
+    ) == .unavailable,
+    "live global delivery must reject an application-level stale editor"
+  )
+  expect(
+    TextInsertionPolicy.focusedElementSource(
+      expectedProcessIdentifier: 42,
+      systemWideProcessIdentifier: 10,
+      applicationProcessIdentifier: 42,
+      allowsApplicationFallback: true
+    ) == .application,
+    "an inactive target may fall back to its application-level focused element for restoration"
+  )
+  expect(
+    TextInsertionPolicy.focusedElementSource(
+      expectedProcessIdentifier: 42,
+      systemWideProcessIdentifier: 10,
+      applicationProcessIdentifier: 11,
+      allowsApplicationFallback: true
+    ) == .unavailable,
+    "focus resolution must reject elements owned by another process"
+  )
+}
+
+testFocusedElementResolutionPrefersTheSystemWideEditor()
+
+func testConfirmedInsertionClearsTheManualRetryPayload() {
+  expect(
+    TextInsertionPolicy.retryText(
+      after: .confirmedInsertion,
+      originalText: "已经写入"
+    ) == nil,
+    "a read-back-confirmed insertion must not remain available for duplicate delivery"
+  )
+  expect(
+    TextInsertionPolicy.retryText(
+      after: .unconfirmedDispatch,
+      originalText: "需要确认"
+    ) == "需要确认",
+    "an unconfirmed dispatch should remain manually recoverable"
+  )
+}
+
+testConfirmedInsertionClearsTheManualRetryPayload()
+
+func testPointerDesktopGeometryRejectsDisplayLayoutHoles() {
+  let displays = [
+    CGRect(x: 0, y: 0, width: 100, height: 100),
+    CGRect(x: 100, y: 0, width: 100, height: 50),
+  ]
+  let projected = PointerDesktopGeometry.projectedTarget(
+    origin: CGPoint(x: 90, y: 90),
+    delta: CGPoint(x: 30, y: 0),
+    displayBounds: displays
+  )
+  expect(
+    projected == CGPoint(x: 99, y: 90),
+    "a target inside an L-shaped desktop hole must project to the nearest real display edge"
+  )
+  expect(
+    PointerDesktopGeometry.projectedTarget(
+      origin: CGPoint(x: 90, y: 20),
+      delta: CGPoint(x: 30, y: 0),
+      displayBounds: displays
+    ) == CGPoint(x: 120, y: 20),
+    "a valid cross-display target must retain its precise coordinates"
+  )
+}
+
+testPointerDesktopGeometryRejectsDisplayLayoutHoles()
 
 func testExternalFocusMustBelongToTheCapturedApplication() {
   expect(
@@ -582,8 +789,8 @@ func testConfigurableActiveInputCadenceDefaultsToHighRate() {
   )
   expect(
     InputCadencePolicy.clampedRate(500) == 240
-      && InputCadencePolicy.clampedRate(30) == 60,
-    "input cadence should remain within the supported 60–240 Hz range"
+      && InputCadencePolicy.clampedRate(30) == 240,
+    "input cadence must stay locked to 240 Hz regardless of stale preferences"
   )
   expect(
     InputCadencePolicy.interval(for: 240) == 1.0 / 240.0,
@@ -651,6 +858,45 @@ func testPhysicalPTTCapturesTheCurrentExternalFocusOwner() {
 }
 
 testPhysicalPTTCapturesTheCurrentExternalFocusOwner()
+
+func testLaunchAutoEnableIsDefaultOnAndConsumedOnlyOnce() {
+  expect(
+    LaunchControlAutoEnablePolicy.defaultEnabled,
+    "launch auto-enable should default on for an already connected controller"
+  )
+  var gate = LaunchControlAutoEnableGate(
+    settingEnabled: LaunchControlAutoEnablePolicy.defaultEnabled,
+    controllerAlreadyConnected: true
+  )
+  expect(
+    gate.consumeForConnection(),
+    "the initial SDL connection event should auto-enable an already connected controller"
+  )
+  expect(
+    !gate.consumeForConnection(),
+    "later reconnects must not undo an explicit manual stop in the same app session"
+  )
+
+  var lateConnection = LaunchControlAutoEnableGate(
+    settingEnabled: true,
+    controllerAlreadyConnected: false
+  )
+  expect(
+    !lateConnection.consumeForConnection(),
+    "connecting a controller after launch should remain an explicit user action"
+  )
+
+  var disabled = LaunchControlAutoEnableGate(
+    settingEnabled: false,
+    controllerAlreadyConnected: true
+  )
+  expect(
+    !disabled.consumeForConnection(),
+    "the persisted setting must disable launch auto-enable"
+  )
+}
+
+testLaunchAutoEnableIsDefaultOnAndConsumedOnlyOnce()
 
 func testManualRetryRequiresAFreshExternalActivationAfterRecognition() {
   var history = ExternalFocusHistory()
@@ -729,6 +975,43 @@ func testVoiceDeliveryKeepsThePTTStartTargetWhenTheFrontmostAppChanges() {
 }
 
 testVoiceDeliveryKeepsThePTTStartTargetWhenTheFrontmostAppChanges()
+
+func testVoiceDeliveryRecapturesOnlyAMissingFocusFromTheVerifiedFrontmostTarget() {
+  expect(
+    TextInsertionPolicy.voiceFocusSnapshotResolution(
+      hasCapturedSnapshot: false,
+      targetIsFrontmost: true,
+      processIdentityMatches: true
+    ) == .recaptureCurrentExternalFocus,
+    "a verified frontmost target should repair a focus snapshot that was unavailable at PTT start"
+  )
+  expect(
+    TextInsertionPolicy.voiceFocusSnapshotResolution(
+      hasCapturedSnapshot: true,
+      targetIsFrontmost: true,
+      processIdentityMatches: true
+    ) == .useCapturedFocus,
+    "an existing PTT-start focus snapshot must remain pinned to its original editor"
+  )
+  expect(
+    TextInsertionPolicy.voiceFocusSnapshotResolution(
+      hasCapturedSnapshot: false,
+      targetIsFrontmost: false,
+      processIdentityMatches: true
+    ) == .retryAfterActivation,
+    "focus must not be recaptured while another application is frontmost"
+  )
+  expect(
+    TextInsertionPolicy.voiceFocusSnapshotResolution(
+      hasCapturedSnapshot: false,
+      targetIsFrontmost: true,
+      processIdentityMatches: false
+    ) == .refuse,
+    "a reused or replaced target process must never receive recognized text"
+  )
+}
+
+testVoiceDeliveryRecapturesOnlyAMissingFocusFromTheVerifiedFrontmostTarget()
 
 func testRetryableVoiceDeliveryStopsAfterTheAttemptBudgetIsExhausted() {
   expect(
@@ -1397,8 +1680,8 @@ func testContinuousScrollEventPreservesFractionalPixels() {
   var accumulator = ContinuousScrollAccumulator()
   let sample = accumulator.update(precisePixels: -0.125)
   expect(
-    sample.pointPixels == -1,
-    "the first meaningful fractional sample should produce an immediate point impulse"
+    sample.pointPixels == 0,
+    "a fractional sample must not be inflated into an early full-point impulse"
   )
   expect(
     abs(sample.precisePixels + 0.125) < 0.000_1,
@@ -1413,8 +1696,8 @@ func testContinuousScrollEventPreservesFractionalPixels() {
     "continuous scroll events should retain a signed fractional fixed-point delta"
   )
   expect(
-    event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1) == -1,
-    "AppKit-compatible point scrolling should start on the same frame"
+    event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1) == 0,
+    "the compatibility point field should wait until cumulative motion reaches half a point"
   )
   guard let appKitEvent = NSEvent(cgEvent: event) else {
     expect(false, "AppKit should accept the continuous CoreGraphics scroll event")
@@ -1429,8 +1712,8 @@ func testContinuousScrollEventPreservesFractionalPixels() {
     "the event's precise delta should remain fractional for compatible applications"
   )
   expect(
-    appKitEvent.scrollingDeltaY == -1,
-    "AppKit's preferred scrolling API should receive the compensated point impulse"
+    appKitEvent.scrollingDeltaY == 0,
+    "AppKit compatibility output must avoid a one-point startup spike"
   )
 }
 
@@ -1454,25 +1737,43 @@ func testContinuousScrollPointImpulsesPreserveLongTermDistance() {
 
 testContinuousScrollPointImpulsesPreserveLongTermDistance()
 
+func testContinuousScrollPointImpulsesRemainEvenAtLowSpeed() {
+  var accumulator = ContinuousScrollAccumulator()
+  var impulseIndices: [Int] = []
+  for index in 0..<32 {
+    if accumulator.update(precisePixels: -0.125).pointPixels != 0 {
+      impulseIndices.append(index)
+    }
+  }
+  expect(
+    impulseIndices == [3, 11, 19, 27],
+    "constant precise scroll should create evenly spaced compatibility impulses"
+  )
+}
+
+testContinuousScrollPointImpulsesRemainEvenAtLowSpeed()
+
 func testContinuousScrollAccumulatorRespondsToDirectionChanges() {
   var accumulator = ContinuousScrollAccumulator()
   expect(
-    accumulator.update(precisePixels: -0.125).pointPixels == -1,
-    "the initial downward scroll should start immediately"
+    accumulator.update(precisePixels: -0.5).pointPixels == -1,
+    "half-point downward motion should produce one compatibility point"
   )
   expect(
-    accumulator.update(precisePixels: 0.125).pointPixels == 1,
-    "reversing the stick should discard old point debt and respond immediately"
+    accumulator.update(precisePixels: 0.5).pointPixels == 1,
+    "reversing the stick should discard old point debt at the same threshold"
   )
 
   accumulator.reset()
-  expect(
-    accumulator.update(precisePixels: -0.0625).pointPixels == 0,
-    "sub-threshold precision should not create a one-point noise impulse"
-  )
+  for _ in 0..<7 {
+    expect(
+      accumulator.update(precisePixels: -0.0625).pointPixels == 0,
+      "sub-threshold precision should not create a one-point noise impulse"
+    )
+  }
   expect(
     accumulator.update(precisePixels: -0.0625).pointPixels == -1,
-    "meaningful sub-pixel input should reach the startup threshold without integer delay"
+    "accumulated half-point motion should become one compatibility point"
   )
 }
 
@@ -1503,6 +1804,14 @@ testContinuousScrollStartupCompensationHasBoundedShortGestureError()
 func testExternalUnicodeFallbackUsesGuardedGlobalHIDRoute() {
   expect(
     TextInsertionPolicy.unicodeEventPostingRoute(
+      confirmedExternalTarget: false,
+      focusReadiness: nil,
+      secureInputEnabled: false
+    ) == .refused,
+    "the global HID route must never target an unconfirmed external editor"
+  )
+  expect(
+    TextInsertionPolicy.unicodeEventPostingRoute(
       confirmedExternalTarget: true,
       focusReadiness: .ready,
       secureInputEnabled: false
@@ -1529,6 +1838,129 @@ func testExternalUnicodeFallbackUsesGuardedGlobalHIDRoute() {
 
 testExternalUnicodeFallbackUsesGuardedGlobalHIDRoute()
 
+func testDisplaySynchronizedMotionCombinesInputSamplesWithoutLosingDistance() {
+  var accumulator = DisplaySynchronizedMotionAccumulator()
+  accumulator.add(pointer: CGPoint(x: 0.08, y: -0.04), scrollPixels: -0.20)
+  accumulator.add(pointer: CGPoint(x: 0.09, y: -0.05), scrollPixels: -0.25)
+
+  let frame = accumulator.drain()
+  expect(
+    abs(frame.pointer.x - 0.17) < 0.000_001
+      && abs(frame.pointer.y + 0.09) < 0.000_001,
+    "two 240 Hz pointer samples should become one distance-preserving display-frame move"
+  )
+  expect(
+    abs(frame.scrollPixels + 0.45) < 0.000_001,
+    "display-frame scroll should preserve every precise input sample"
+  )
+  expect(accumulator.drain() == .zero, "draining a display frame must clear pending motion")
+}
+
+testDisplaySynchronizedMotionCombinesInputSamplesWithoutLosingDistance()
+
+func testDisplaySynchronizedMotionResetDropsStaleDirectionDebt() {
+  var accumulator = DisplaySynchronizedMotionAccumulator()
+  accumulator.add(pointer: CGPoint(x: 0.25, y: 0), scrollPixels: -0.125)
+  accumulator.reset()
+  accumulator.add(pointer: CGPoint(x: -0.10, y: 0), scrollPixels: 0.25)
+
+  let frame = accumulator.drain()
+  expect(
+    abs(frame.pointer.x + 0.10) < 0.000_001 && abs(frame.scrollPixels - 0.25) < 0.000_001,
+    "reset motion must not leak an old direction into the next display frame"
+  )
+}
+
+testDisplaySynchronizedMotionResetDropsStaleDirectionDebt()
+
+func testDisplayFramePreservesScrollEndAfterPendingDistance() {
+  var accumulator = DisplaySynchronizedMotionAccumulator()
+  var scrollAccumulator = ContinuousScrollAccumulator()
+  accumulator.add(pointer: .zero, scrollPixels: -0.125)
+  accumulator.add(
+    pointer: .zero,
+    scrollPixels: 0,
+    scrollGestureEnded: true
+  )
+
+  let frame = accumulator.drain()
+  expect(
+    abs(frame.scrollPixels + 0.125) < 0.000_001,
+    "a final zero sample must not erase pending precise scroll distance"
+  )
+  expect(
+    frame.scrollGestureEnded,
+    "a scroll end marker must survive aggregation with an earlier nonzero sample"
+  )
+  let finalSample = scrollAccumulator.update(precisePixels: frame.scrollPixels)
+  if frame.scrollGestureEnded { scrollAccumulator.reset() }
+  expect(
+    abs(finalSample.precisePixels + 0.125) < 0.000_001,
+    "the final precise distance must be emitted before the scroll state is reset"
+  )
+}
+
+testDisplayFramePreservesScrollEndAfterPendingDistance()
+
+func testUnicodeTextEventsArePlannedPerComposedCharacter() {
+  let text = "你好e\u{301}🙂"
+  let chunks = UnicodeTextEventPlanner.chunks(for: text)
+  expect(chunks.joined() == text, "Unicode event chunks must reconstruct the transcript exactly")
+  expect(
+    chunks == text.map(String.init),
+    "each keyboard event must preserve one complete grapheme instead of sending the whole transcript"
+  )
+  expect(
+    chunks.allSatisfy { !$0.utf16.isEmpty },
+    "Unicode delivery must not schedule empty keyboard events"
+  )
+}
+
+testUnicodeTextEventsArePlannedPerComposedCharacter()
+
+func testPartialUnicodeDeliveryRetriesOnlyTheUndeliveredSuffix() {
+  let chunks = UnicodeTextEventPlanner.chunks(for: "甲乙丙丁")
+  expect(
+    UnicodeDeliveryProgress.remainingText(chunks: chunks, sentCount: 2) == "丙丁",
+    "a partial delivery retry must not duplicate the prefix already posted to the target"
+  )
+  expect(
+    UnicodeDeliveryProgress.remainingText(chunks: chunks, sentCount: 99).isEmpty,
+    "a completed delivery must not retain phantom retry text"
+  )
+}
+
+testPartialUnicodeDeliveryRetriesOnlyTheUndeliveredSuffix()
+
+func testAccessibilityWriteSuccessRequiresValueReadback() {
+  expect(
+    AccessibilityTextWriteVerification.evaluate(
+      before: "hello ",
+      expected: "hello world",
+      after: "hello world"
+    ) == .confirmed,
+    "AX success is confirmed only when the target value matches the expected edit"
+  )
+  expect(
+    AccessibilityTextWriteVerification.evaluate(
+      before: "hello ",
+      expected: "hello world",
+      after: "hello "
+    ) == .unchanged,
+    "an unchanged AX value must not be reported as a confirmed insertion"
+  )
+  expect(
+    AccessibilityTextWriteVerification.evaluate(
+      before: nil,
+      expected: nil,
+      after: nil
+    ) == .unverifiable,
+    "a target without readable value/range cannot produce a confirmed AX result"
+  )
+}
+
+testAccessibilityWriteSuccessRequiresValueReadback()
+
 func testShortcutEditorsWrapBeforeControlsOverlap() {
   expect(
     MappingLayoutPolicy.shortcutColumnCount(for: 700) == 2,
@@ -1541,6 +1973,43 @@ func testShortcutEditorsWrapBeforeControlsOverlap() {
 }
 
 testShortcutEditorsWrapBeforeControlsOverlap()
+
+func testSparkleConfigurationFailsClosed() {
+  let configured: [String: Any] = [
+    "SUFeedURL": "https://github.com/tonycoder-hub/helm-dualsense/releases/latest/download/appcast.xml",
+    "SUPublicEDKey": "public-key",
+    "SURequireSignedFeed": true,
+    "SUVerifyUpdateBeforeExtraction": true,
+    "SUSignedFeedFailureExpirationInterval": 0,
+    "SUEnableAutomaticChecks": false,
+  ]
+  expect(
+    SparkleUpdateConfigurationPolicy.isConfigured(info: configured),
+    "the updater should start only when every signed-feed safeguard is present"
+  )
+
+  for missingKey in [
+    "SURequireSignedFeed",
+    "SUVerifyUpdateBeforeExtraction",
+    "SUSignedFeedFailureExpirationInterval",
+  ] {
+    var incomplete = configured
+    incomplete.removeValue(forKey: missingKey)
+    expect(
+      !SparkleUpdateConfigurationPolicy.isConfigured(info: incomplete),
+      "the updater must fail closed when \(missingKey) is absent"
+    )
+  }
+
+  var expiringFailure = configured
+  expiringFailure["SUSignedFeedFailureExpirationInterval"] = 1
+  expect(
+    !SparkleUpdateConfigurationPolicy.isConfigured(info: expiringFailure),
+    "a signed-feed validation failure must never expire into an unsigned fallback"
+  )
+}
+
+testSparkleConfigurationFailsClosed()
 
 let audioInputs = AudioInputCatalog.devices()
 expect(!audioInputs.isEmpty, "at least one Mac-supported audio input should be discoverable")

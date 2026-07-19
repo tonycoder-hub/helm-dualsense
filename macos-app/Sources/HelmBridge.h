@@ -79,8 +79,6 @@ typedef struct HelmSDLAnalogState {
     float right_trigger;
 } HelmSDLAnalogState;
 
-typedef void (*HelmCadenceCallback)(void *context);
-
 bool HelmSDLStart(char *error_buffer, int32_t error_capacity);
 bool HelmSDLPoll(HelmSDLEvent *event);
 bool HelmSDLReadAnalogState(HelmSDLAnalogState *state);
@@ -92,8 +90,6 @@ bool HelmSDLButtonPressed(int32_t button);
 bool HelmSDLHasRumble(void);
 bool HelmSDLRumble(uint16_t low_frequency, uint16_t high_frequency, uint32_t duration_ms);
 void HelmSDLStopRumble(void);
-bool HelmCadenceStart(HelmCadenceCallback callback, void *context);
-void HelmCadenceStop(void);
 bool HelmSecureInputEnabled(void);
 
 #endif

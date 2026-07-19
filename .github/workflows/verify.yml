@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release-contract:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -25,5 +25,49 @@ jobs:
           bash -n macos-app/scripts/verify-release-artifact.sh
           bash -n macos-app/Tests/release-preflight-tests.sh
           bash -n macos-app/Tests/release-security-tests.sh
+          bash -n macos-app/Tests/github-release-contract-tests.sh
           macos-app/Tests/release-preflight-tests.sh
           macos-app/Tests/release-security-tests.sh
+          macos-app/Tests/github-release-contract-tests.sh
+
+  core-build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Fetch hash-pinned frameworks
+        run: |
+          set -euo pipefail
+          sdl_version=$(tr -d '[:space:]' < macos-app/ThirdParty/SDL.version)
+          sdl_hash=$(tr -d '[:space:]' < macos-app/ThirdParty/SDL.sha256)
+          sparkle_version=$(tr -d '[:space:]' < macos-app/ThirdParty/Sparkle.version)
+          sparkle_hash=$(tr -d '[:space:]' < macos-app/ThirdParty/Sparkle.sha256)
+          sdl_archive="$RUNNER_TEMP/SDL3.dmg"
+          sparkle_archive="$RUNNER_TEMP/Sparkle.tar.xz"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+            "https://github.com/libsdl-org/SDL/releases/download/release-$sdl_version/SDL3-$sdl_version.dmg" \
+            -o "$sdl_archive"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+            "https://github.com/sparkle-project/Sparkle/releases/download/$sparkle_version/Sparkle-$sparkle_version.tar.xz" \
+            -o "$sparkle_archive"
+          printf '%s  %s\n' "$sdl_hash" "$sdl_archive" | shasum -a 256 -c -
+          printf '%s  %s\n' "$sparkle_hash" "$sparkle_archive" | shasum -a 256 -c -
+
+          sparkle_dir="$RUNNER_TEMP/sparkle-distribution"
+          mkdir -p "$sparkle_dir" macos-app/.vendor
+          tar -xf "$sparkle_archive" -C "$sparkle_dir"
+          ditto "$sparkle_dir/Sparkle.framework" macos-app/.vendor/Sparkle.framework
+          ditto "$sparkle_dir/LICENSE" macos-app/.vendor/Sparkle-LICENSE.txt
+
+          mount_dir=$(mktemp -d "$RUNNER_TEMP/helm-sdl.XXXXXX")
+          cleanup_sdl() { hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; }
+          trap cleanup_sdl EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$sdl_archive"
+          ditto "$mount_dir/SDL3.xcframework/macos-arm64_x86_64/SDL3.framework" \
+            macos-app/.vendor/SDL3.framework
+          hdiutil detach "$mount_dir"
+          trap - EXIT
+      - name: Compile and run core Swift and C tests
+        run: macos-app/scripts/build-and-install.sh

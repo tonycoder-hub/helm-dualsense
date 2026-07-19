@@ -40,13 +40,15 @@ L2 acts like a racing-game brake and R2 acts like an accelerator. Their minimum
 and maximum multipliers are configurable and apply to left-stick/touchpad
 pointer movement and right-stick scrolling.
 
-Input processing uses a configurable 60–240 Hz active cadence and defaults to
-240 Hz. A low-latency radial response floor, configurable response and smoothing
+Input processing is locked to a 240 Hz high-priority active cadence. A
+low-latency radial response floor, configurable response and smoothing
 curves, elapsed-time integration, and fractional continuous-pixel scrolling keep
 light stick input responsive without changing speed across variable frame
 intervals. Helm reads the current left stick, right stick, and triggers on every
 cadence tick, so motion no longer depends on how frequently a particular axis
-happens to emit SDL events.
+happens to emit SDL events. Right-stick fractional scroll output is accumulated
+and rounded symmetrically, avoiding a full-point startup impulse followed by a
+visible repayment pause.
 
 ## Haptic feedback
 
@@ -61,8 +63,11 @@ adaptive-trigger effects are intentionally a separate future feature. See the
 
 - SDL-standard PS4/PS5, Xbox 360/One-class, Nintendo Switch Pro, and generic
   standard mappings are accepted; button labels follow each controller family.
-- Controls start disabled and return to disabled after reconnect, sleep/timer
-  gaps, permission loss, disconnect, or app termination.
+- When a controller is already connected as Helm launches, controls
+  automatically enable by default after Accessibility is confirmed. This is a
+  configurable one-shot launch action, so a later reconnect does not override a
+  manual stop. Sleep/timer gaps, permission loss, disconnect, app termination,
+  and the emergency chord still release all held actions immediately.
 - Accessibility, Microphone, and Speech permissions are requested only after an
   explicit action in the visible UI.
 - Pending Speech callbacks are cancelled on emergency stop.
@@ -71,13 +76,17 @@ adaptive-trigger effects are intentionally a separate future feature. See the
 - Recognized text first uses the focused Accessibility text element, then uses
   Unicode keyboard events for the confirmed external target when dynamic web
   editors reject direct AX insertion or expose a generic accessibility role.
-  Helm fixes the external target at PTT start, restores it before delivery,
-  verifies that the focused Accessibility element belongs to that process, and
+  Helm fixes the external process identity at PTT start, restores it before
+  delivery, verifies that the focused Accessibility element belongs to that
+  process, and
   only then posts the Unicode fallback through the global HID event path used by
   web/Electron editors. Secure Input and secure text
   fields are refused; the clipboard is never used as a fallback. Direct AX insertion is reported as confirmed;
   Unicode event delivery is explicitly reported as unconfirmed because the
-  target application may ignore it.
+  target application may ignore it. If the UI PTT action prevented an AX text
+  snapshot at capture time, Helm may recapture the currently focused element
+  only after the exact original process is frontmost again; an existing snapshot
+  is never replaced by a later focus.
 
 ## Voice limitation
 
@@ -102,7 +111,7 @@ Bluetooth capture immediately cancels that capture before switching the picker.
 - Apple Command Line Tools or Xcode
 - A DualSense / DualSense Edge, Xbox-compatible controller, or Nintendo Switch Pro Controller
 - SDL3 3.4.12 macOS framework
-- Sparkle 2.9.4 macOS framework (pinned but inactive until the formal feed is configured)
+- Sparkle 2.9.4 macOS framework
 
 The current Demo is ad-hoc signed for local development. Real controller,
 Accessibility, and speech behavior should be validated on the target Mac before
@@ -116,10 +125,13 @@ every retry to reject PID reuse. The recovery action otherwise reuses the same
 Accessibility, secure-input, and bounded-retry checks; it does not record audio
 again or use the clipboard.
 
-Formal Developer ID signing, notarization, and signed Sparkle updates are
-fail-closed preparation work, not current Demo capabilities. See the
-[release and update contract](docs/release-and-updates.md) and run
-`macos-app/scripts/release-preflight.sh` to see the remaining gates.
+The public Demo update channel uses manually dispatched GitHub Releases with a
+signed Sparkle appcast. Updates are verified before extraction, signed-feed
+failures never expire into an unsigned fallback, and background checks remain
+disabled. Its ad-hoc signature
+is for testing and is not a substitute for Developer ID signing or Apple
+notarization. See the [release and update contract](docs/release-and-updates.md)
+for the separate formal-release gates.
 
 ## Build and install
 
@@ -173,8 +185,11 @@ Accessibility, Microphone, and Speech all remained authorized after every
 relaunch. That evidence is scoped to this local Demo identity and does not claim
 the same behavior for a future Developer ID distribution.
 
-The Demo has no feed URL or update public key, so its updater stays disabled and
-does not contact a placeholder service. Formal release verification additionally
+The Demo embeds the dedicated public update key and a stable GitHub Releases
+feed URL, requires pre-extraction verification, and permanently fails closed on
+feed-signature errors. Until the first release is published, a manual update check may report
+that no feed is available; background checks remain off. Public Demo releases
+are ad-hoc signed and intended for testing. Formal release verification additionally
 binds an exact Developer ID certificate and Team ID, checks both official SDL
 and Sparkle archive hashes and signature-normalized embedded contents, verifies
 embedded linkage and archive-sourced Sparkle tools, rejects any Mach-O outside

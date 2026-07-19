@@ -1,11 +1,10 @@
 #include "HelmBridge.h"
 
 #include <Carbon/Carbon.h>
-#include <CoreVideo/CoreVideo.h>
 #include <SDL3/SDL.h>
-#include <dispatch/dispatch.h>
+#include <pthread.h>
 #include <stdio.h>
-#include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 static SDL_Gamepad *active_gamepad = NULL;
@@ -21,40 +20,14 @@ static int32_t active_controller_family = HELM_CONTROLLER_FAMILY_GENERIC;
 static int32_t active_connection = SDL_JOYSTICK_CONNECTION_UNKNOWN;
 static Uint16 active_vendor_id = 0;
 static Uint16 active_product_id = 0;
-static CVDisplayLinkRef cadence_display_link = NULL;
-static HelmCadenceCallback cadence_callback = NULL;
-static void *cadence_context = NULL;
-static _Atomic bool cadence_delivery_pending = false;
+static pthread_mutex_t bridge_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static void deliver_cadence_on_main(void *unused) {
-    (void)unused;
-    atomic_store_explicit(&cadence_delivery_pending, false, memory_order_release);
-    if (cadence_callback != NULL) {
-        cadence_callback(cadence_context);
-    }
+static void lock_bridge(void) {
+    (void)pthread_mutex_lock(&bridge_mutex);
 }
 
-static CVReturn cadence_display_callback(
-    CVDisplayLinkRef display_link,
-    const CVTimeStamp *now,
-    const CVTimeStamp *output_time,
-    CVOptionFlags flags_in,
-    CVOptionFlags *flags_out,
-    void *context) {
-    (void)display_link;
-    (void)now;
-    (void)output_time;
-    (void)flags_in;
-    (void)flags_out;
-    (void)context;
-    bool was_pending = atomic_exchange_explicit(
-        &cadence_delivery_pending,
-        true,
-        memory_order_acq_rel);
-    if (!was_pending) {
-        dispatch_async_f(dispatch_get_main_queue(), NULL, deliver_cadence_on_main);
-    }
-    return kCVReturnSuccess;
+static void unlock_bridge(void) {
+    (void)pthread_mutex_unlock(&bridge_mutex);
 }
 
 static void stop_rumble(void) {
@@ -177,7 +150,9 @@ static int32_t semantic_button(Uint8 button) {
 }
 
 bool HelmSDLStart(char *error_buffer, int32_t error_capacity) {
+    lock_bridge();
     if (initialized) {
+        unlock_bridge();
         return true;
     }
 
@@ -188,6 +163,7 @@ bool HelmSDLStart(char *error_buffer, int32_t error_capacity) {
 
     if (!SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_EVENTS)) {
         copy_text(error_buffer, (size_t)error_capacity, SDL_GetError());
+        unlock_bridge();
         return false;
     }
     initialized = true;
@@ -200,6 +176,7 @@ bool HelmSDLStart(char *error_buffer, int32_t error_capacity) {
                 if (!open_gamepad(gamepads[index])) {
                     copy_text(error_buffer, (size_t)error_capacity, SDL_GetError());
                     SDL_free(gamepads);
+                    unlock_bridge();
                     return false;
                 }
                 break;
@@ -207,20 +184,27 @@ bool HelmSDLStart(char *error_buffer, int32_t error_capacity) {
         }
     }
     SDL_free(gamepads);
+    unlock_bridge();
     return true;
 }
 
 bool HelmSDLPoll(HelmSDLEvent *output) {
-    if (!initialized || output == NULL) {
+    if (output == NULL) {
         return false;
     }
     clear_event(output);
 
+    lock_bridge();
+    if (!initialized) {
+        unlock_bridge();
+        return false;
+    }
     if (pending_connected && active_gamepad != NULL) {
         pending_connected = false;
         output->kind = HELM_SDL_EVENT_CONNECTED;
         copy_controller_identity(output);
         copy_text(output->text, sizeof(output->text), SDL_GetGamepadName(active_gamepad));
+        unlock_bridge();
         return true;
     }
 
@@ -229,6 +213,7 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
         output->kind = HELM_SDL_EVENT_LEFT_STICK;
         output->x = left_stick_x;
         output->y = left_stick_y;
+        unlock_bridge();
         return true;
     }
 
@@ -237,11 +222,22 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
         output->kind = HELM_SDL_EVENT_TRIGGERS;
         output->x = left_trigger;
         output->y = right_trigger;
+        unlock_bridge();
         return true;
     }
+    unlock_bridge();
 
     SDL_Event event;
-    while (SDL_PollEvent(&event)) {
+    int processed_events = 0;
+    const int maximum_events_per_poll = 256;
+    while (processed_events < maximum_events_per_poll && SDL_PollEvent(&event)) {
+        processed_events++;
+        bool produced_output = false;
+        lock_bridge();
+        if (!initialized) {
+            unlock_bridge();
+            return false;
+        }
         switch (event.type) {
             case SDL_EVENT_GAMEPAD_ADDED:
                 if (active_gamepad == NULL && is_supported_gamepad(event.gdevice.which)) {
@@ -254,7 +250,7 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
                         output->kind = HELM_SDL_EVENT_ERROR;
                         copy_text(output->text, sizeof(output->text), SDL_GetError());
                     }
-                    return true;
+                    produced_output = true;
                 }
                 break;
 
@@ -267,7 +263,7 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
                     reset_triggers();
                     output->kind = HELM_SDL_EVENT_DISCONNECTED;
                     copy_controller_identity(output);
-                    return true;
+                    produced_output = true;
                 }
                 break;
 
@@ -279,7 +275,7 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
                         output->kind = HELM_SDL_EVENT_BUTTON;
                         output->button = button;
                         output->pressed = event.gbutton.down ? 1 : 0;
-                        return true;
+                        produced_output = true;
                     }
                 }
                 break;
@@ -320,12 +316,16 @@ bool HelmSDLPoll(HelmSDLEvent *output) {
                     output->x = event.gtouchpad.x;
                     output->y = event.gtouchpad.y;
                     output->value = event.gtouchpad.pressure;
-                    return true;
+                    produced_output = true;
                 }
                 break;
 
             default:
                 break;
+        }
+        unlock_bridge();
+        if (produced_output) {
+            return true;
         }
     }
     return false;
@@ -336,12 +336,15 @@ bool HelmSDLReadAnalogState(HelmSDLAnalogState *state) {
         return false;
     }
     memset(state, 0, sizeof(*state));
+    lock_bridge();
     if (!initialized || active_gamepad == NULL) {
+        unlock_bridge();
         return false;
     }
 
     SDL_UpdateGamepads();
     if (!SDL_GamepadConnected(active_gamepad)) {
+        unlock_bridge();
         return false;
     }
 
@@ -356,10 +359,12 @@ bool HelmSDLReadAnalogState(HelmSDLAnalogState *state) {
         SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
     state->right_trigger = normalized_trigger(
         SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+    unlock_bridge();
     return true;
 }
 
 void HelmSDLStop(void) {
+    lock_bridge();
     if (active_gamepad != NULL) {
         stop_rumble();
         SDL_CloseGamepad(active_gamepad);
@@ -376,31 +381,47 @@ void HelmSDLStop(void) {
         SDL_QuitSubSystem(SDL_INIT_GAMEPAD | SDL_INIT_EVENTS);
         initialized = false;
     }
+    unlock_bridge();
 }
 
 bool HelmSDLHasMicrophoneButton(void) {
-    return active_gamepad != NULL &&
+    lock_bridge();
+    bool result = active_gamepad != NULL &&
         SDL_GamepadHasButton(active_gamepad, SDL_GAMEPAD_BUTTON_MISC1);
+    unlock_bridge();
+    return result;
 }
 
 int32_t HelmSDLTouchpadCount(void) {
-    return active_gamepad == NULL ? 0 : SDL_GetNumGamepadTouchpads(active_gamepad);
+    lock_bridge();
+    int32_t result = active_gamepad == NULL ? 0 : SDL_GetNumGamepadTouchpads(active_gamepad);
+    unlock_bridge();
+    return result;
 }
 
 int32_t HelmSDLConnectionState(void) {
-    return active_gamepad == NULL ? -1 : (int32_t)SDL_GetGamepadConnectionState(active_gamepad);
+    lock_bridge();
+    int32_t result = active_gamepad == NULL
+        ? -1
+        : (int32_t)SDL_GetGamepadConnectionState(active_gamepad);
+    unlock_bridge();
+    return result;
 }
 
 bool HelmSDLButtonPressed(int32_t button) {
+    lock_bridge();
     if (active_gamepad == NULL || button < HELM_BUTTON_SOUTH ||
         button > HELM_BUTTON_MISC6) {
+        unlock_bridge();
         return false;
     }
     SDL_GamepadButton sdl_button = (SDL_GamepadButton)(button - 1);
-    return SDL_GetGamepadButton(active_gamepad, sdl_button);
+    bool result = SDL_GetGamepadButton(active_gamepad, sdl_button);
+    unlock_bridge();
+    return result;
 }
 
-bool HelmSDLHasRumble(void) {
+static bool has_rumble_locked(void) {
     if (active_gamepad == NULL) {
         return false;
     }
@@ -411,71 +432,40 @@ bool HelmSDLHasRumble(void) {
         false);
 }
 
+bool HelmSDLHasRumble(void) {
+    lock_bridge();
+    bool result = has_rumble_locked();
+    unlock_bridge();
+    return result;
+}
+
 bool HelmSDLRumble(
     uint16_t low_frequency,
     uint16_t high_frequency,
     uint32_t duration_ms) {
+    lock_bridge();
     if (active_gamepad == NULL || duration_ms == 0 ||
-        (low_frequency == 0 && high_frequency == 0) || !HelmSDLHasRumble()) {
+        (low_frequency == 0 && high_frequency == 0) || !has_rumble_locked()) {
+        unlock_bridge();
         return false;
     }
     const uint32_t maximum_duration_ms = 250;
     if (duration_ms > maximum_duration_ms) {
         duration_ms = maximum_duration_ms;
     }
-    return SDL_RumbleGamepad(
+    bool result = SDL_RumbleGamepad(
         active_gamepad,
         low_frequency,
         high_frequency,
         duration_ms);
+    unlock_bridge();
+    return result;
 }
 
 void HelmSDLStopRumble(void) {
+    lock_bridge();
     stop_rumble();
-}
-
-bool HelmCadenceStart(HelmCadenceCallback callback, void *context) {
-    HelmCadenceStop();
-    if (callback == NULL) {
-        return false;
-    }
-    cadence_callback = callback;
-    cadence_context = context;
-    atomic_store_explicit(&cadence_delivery_pending, false, memory_order_release);
-
-    CVReturn status;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    status = CVDisplayLinkCreateWithActiveCGDisplays(&cadence_display_link);
-    if (status == kCVReturnSuccess && cadence_display_link != NULL) {
-        status = CVDisplayLinkSetOutputCallback(
-            cadence_display_link,
-            cadence_display_callback,
-            NULL);
-    }
-    if (status == kCVReturnSuccess && cadence_display_link != NULL) {
-        status = CVDisplayLinkStart(cadence_display_link);
-    }
-#pragma clang diagnostic pop
-    if (status == kCVReturnSuccess) {
-        return true;
-    }
-    HelmCadenceStop();
-    return false;
-}
-
-void HelmCadenceStop(void) {
-    cadence_callback = NULL;
-    cadence_context = NULL;
-    if (cadence_display_link != NULL) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        CVDisplayLinkStop(cadence_display_link);
-        CVDisplayLinkRelease(cadence_display_link);
-#pragma clang diagnostic pop
-        cadence_display_link = NULL;
-    }
-    atomic_store_explicit(&cadence_delivery_pending, false, memory_order_release);
+    unlock_bridge();
 }
 
 bool HelmSecureInputEnabled(void) {
