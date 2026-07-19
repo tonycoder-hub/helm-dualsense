@@ -123,6 +123,7 @@ int main(void) {
     sampler_started = true;
 
     const Uint64 exercise_duration_ns = 1250000000ULL;
+    const Uint64 event_interval_ns = 1000000000ULL / 60ULL;
     const Uint64 exercise_started_at = SDL_GetTicksNS();
     unsigned int iteration = 0;
     while (SDL_GetTicksNS() - exercise_started_at < exercise_duration_ns) {
@@ -136,7 +137,7 @@ int main(void) {
         for (int pump = 0; pump < 32 && HelmSDLPoll(&event); pump++) {
         }
         iteration++;
-        SDL_DelayPrecise(1000000ULL);
+        SDL_DelayPrecise(event_interval_ns);
     }
 
     SDL_CloseJoystick(joystick);
