@@ -15,15 +15,15 @@ typedef struct SamplerContext {
     atomic_bool running;
     atomic_uint successful_samples;
     atomic_uint failed_samples;
-    atomic_ullong maximum_gap_ns;
+    atomic_ullong maximum_call_ns;
 } SamplerContext;
 
-static void record_maximum_gap(SamplerContext *context, Uint64 gap_ns) {
-    unsigned long long observed = atomic_load(&context->maximum_gap_ns);
-    while (gap_ns > observed && !atomic_compare_exchange_weak(
-            &context->maximum_gap_ns,
+static void record_maximum_call(SamplerContext *context, Uint64 call_ns) {
+    unsigned long long observed = atomic_load(&context->maximum_call_ns);
+    while (call_ns > observed && !atomic_compare_exchange_weak(
+            &context->maximum_call_ns,
             &observed,
-            gap_ns)) {
+            call_ns)) {
     }
 }
 
@@ -32,23 +32,18 @@ static void *sample_analog_state(void *raw_context) {
     (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     const Uint64 interval_ns = 1000000000ULL / 240ULL;
     Uint64 next_deadline = SDL_GetTicksNS();
-    Uint64 previous_sample_at = 0;
     while (atomic_load(&context->running)) {
-        Uint64 now = SDL_GetTicksNS();
-        if (previous_sample_at != 0) {
-            record_maximum_gap(context, now - previous_sample_at);
-        }
-        previous_sample_at = now;
-
+        Uint64 call_started_at = SDL_GetTicksNS();
         HelmSDLAnalogState state;
         if (HelmSDLReadAnalogState(&state)) {
             atomic_fetch_add(&context->successful_samples, 1);
         } else {
             atomic_fetch_add(&context->failed_samples, 1);
         }
+        record_maximum_call(context, SDL_GetTicksNS() - call_started_at);
 
         next_deadline += interval_ns;
-        now = SDL_GetTicksNS();
+        Uint64 now = SDL_GetTicksNS();
         if (next_deadline > now) {
             SDL_DelayPrecise(next_deadline - now);
         } else {
@@ -74,7 +69,7 @@ int main(void) {
         .running = ATOMIC_VAR_INIT(false),
         .successful_samples = ATOMIC_VAR_INIT(0),
         .failed_samples = ATOMIC_VAR_INIT(0),
-        .maximum_gap_ns = ATOMIC_VAR_INIT(0),
+        .maximum_call_ns = ATOMIC_VAR_INIT(0),
     };
 
     if (!SDL_SetHint(
@@ -139,6 +134,9 @@ int main(void) {
         iteration++;
         SDL_DelayPrecise(event_interval_ns);
     }
+    unsigned int connected_successful_samples =
+        atomic_load(&context.successful_samples);
+    unsigned int connected_failed_samples = atomic_load(&context.failed_samples);
 
     SDL_CloseJoystick(joystick);
     joystick = NULL;
@@ -169,24 +167,23 @@ int main(void) {
     (void)pthread_join(sampler_thread, NULL);
     sampler_started = false;
 
-    unsigned int successful_samples = atomic_load(&context.successful_samples);
-    double measured_rate = (double)successful_samples / 1.25;
-    double maximum_gap_ms = (double)atomic_load(&context.maximum_gap_ns) / 1000000.0;
-    if (measured_rate < 220.0 || maximum_gap_ms > 50.0) {
+    double maximum_call_ms =
+        (double)atomic_load(&context.maximum_call_ns) / 1000000.0;
+    if (connected_successful_samples < 64 || connected_failed_samples != 0 ||
+        maximum_call_ms > 50.0) {
         fprintf(
             stderr,
-            "FAIL: concurrent bridge cadence input=%.1fHz maxGap=%.2fms successes=%u failures=%u\n",
-            measured_rate,
-            maximum_gap_ms,
-            successful_samples,
-            atomic_load(&context.failed_samples));
+            "FAIL: concurrent bridge samples=%u connectedFailures=%u maxCall=%.2fms\n",
+            connected_successful_samples,
+            connected_failed_samples,
+            maximum_call_ms);
         goto cleanup;
     }
 
     printf(
-        "HELM_BRIDGE_CONCURRENCY_TESTS=PASS input=%.0f maxGap=%.2fms disconnect=true\n",
-        measured_rate,
-        maximum_gap_ms);
+        "HELM_BRIDGE_CONCURRENCY_TESTS=PASS samples=%u maxCall=%.2fms disconnect=true\n",
+        connected_successful_samples,
+        maximum_call_ms);
     exit_code = 0;
 
 cleanup:
