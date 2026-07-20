@@ -16,7 +16,7 @@ into `macos-app/.vendor/SDL3.framework` locally. The framework is not committed.
 Formal preflight snapshots the caller's regular-file DMG, checks the machine
 pin, mounts it read-only, and compares the vendor tree after signature
 normalization. Final verification repeats that comparison against the embedded,
-release-signed framework. `build-and-install.sh` embeds it in `Helm Demo.app`.
+release-signed framework. `build-and-install.sh` embeds it in `GripPilot.app`.
 SDL uses the zlib license; the official `LICENSE.txt` is copied into the app
 resources.
 

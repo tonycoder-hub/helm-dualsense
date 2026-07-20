@@ -69,7 +69,7 @@ struct ControlCenterView: View {
         .controlSize(.small)
         .disabled(!model.canCheckForUpdates)
         .help(model.updateChannelLabel)
-      Text("0.11.0")
+      Text("0.11.1")
         .font(.caption.weight(.bold))
         .foregroundStyle(helmAccent)
         .padding(.horizontal, 10)
@@ -423,9 +423,9 @@ struct ControlCenterView: View {
         detail: model.speechPermissionLabel
       )
       HStack {
-        Button("辅助功能") { model.requestAccessibility() }
+        Button("辅助功能设置") { model.requestAccessibility() }
           .buttonStyle(.bordered)
-        Button("语音权限") { model.requestVoicePermissions() }
+        Button("语音权限设置") { model.requestVoicePermissions() }
           .buttonStyle(.bordered)
       }
     }

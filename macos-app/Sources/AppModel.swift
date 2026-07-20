@@ -472,22 +472,73 @@ final class AppModel: ObservableObject {
   }
 
   func requestAccessibility() {
-    _ = InputInjector.accessibilityTrusted(prompt: true)
-    setStatus("已打开辅助功能授权流程。授权后返回 GripPilot 并点“刷新”。", log: true)
+    refreshPermissionState()
+    switch PermissionRequestActionPolicy.accessibility(isTrusted: accessibilityGranted) {
+    case .requestAccessibility:
+      let granted = InputInjector.accessibilityTrusted(prompt: true)
+      refreshPermissionState()
+      if granted {
+        setStatus("辅助功能已经授权。", log: true)
+      } else {
+        let opened = InputInjector.openAccessibilitySettings()
+        setStatus(
+          opened
+            ? "已打开辅助功能设置；勾选 GripPilot 后返回并点“刷新”。"
+            : "无法自动打开辅助功能设置，请在系统设置的“隐私与安全性”中手动打开。",
+          log: true
+        )
+      }
+    case .openAccessibilitySettings:
+      let opened = InputInjector.openAccessibilitySettings()
+      setStatus(
+        opened
+          ? "辅助功能已授权；已打开系统设置，可在这里管理或重新授权。"
+          : "辅助功能已授权，但无法自动打开系统设置。",
+        log: true
+      )
+    default:
+      preconditionFailure("Unexpected accessibility permission action")
+    }
   }
 
   func requestVoicePermissions() {
-    if microphoneAuthorization == .notDetermined {
+    refreshPermissionState()
+    let action = PermissionRequestActionPolicy.voice(
+      microphone: permissionGrantState(microphoneAuthorization),
+      speech: permissionGrantState(speechAuthorization)
+    )
+    switch action {
+    case .requestMicrophone:
       AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
         Task { @MainActor in
           self?.refreshPermissionState()
           self?.requestSpeechPermissionIfNeeded()
         }
       }
-    } else {
+      setStatus("正在按顺序请求麦克风与语音识别权限。", log: true)
+    case .requestSpeech:
       requestSpeechPermissionIfNeeded()
+      setStatus("正在请求语音识别权限。", log: true)
+    case .openMicrophoneSettings:
+      startAlwaysOnAfterPermissionGrantIfNeeded()
+      let opened = InputInjector.openMicrophoneSettings()
+      setStatus(
+        opened
+          ? "已打开麦克风权限设置；可在这里管理或重新授权 GripPilot。"
+          : "无法自动打开麦克风权限设置，请在系统设置的“隐私与安全性”中手动打开。",
+        log: true
+      )
+    case .openSpeechSettings:
+      let opened = InputInjector.openSpeechRecognitionSettings()
+      setStatus(
+        opened
+          ? "已打开语音识别权限设置；授权 GripPilot 后返回并点“刷新”。"
+          : "无法自动打开语音识别权限设置，请在系统设置的“隐私与安全性”中手动打开。",
+        log: true
+      )
+    default:
+      preconditionFailure("Unexpected voice permission action")
     }
-    setStatus("正在按顺序请求麦克风与语音识别权限。", log: true)
   }
 
   func refreshEnvironment(forceAudio: Bool = true) {
@@ -743,6 +794,30 @@ final class AppModel: ObservableObject {
         self?.refreshPermissionState()
         self?.startAlwaysOnAfterPermissionGrantIfNeeded()
       }
+    }
+  }
+
+  private func permissionGrantState(
+    _ status: AVAuthorizationStatus
+  ) -> PermissionGrantState {
+    switch status {
+    case .notDetermined: return .notDetermined
+    case .denied: return .denied
+    case .restricted: return .restricted
+    case .authorized: return .authorized
+    @unknown default: return .restricted
+    }
+  }
+
+  private func permissionGrantState(
+    _ status: SFSpeechRecognizerAuthorizationStatus
+  ) -> PermissionGrantState {
+    switch status {
+    case .notDetermined: return .notDetermined
+    case .denied: return .denied
+    case .restricted: return .restricted
+    case .authorized: return .authorized
+    @unknown default: return .restricted
     }
   }
 

@@ -11,7 +11,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-installed="$workspace/Helm Demo.app"
+installed="$workspace/GripPilot.app"
 staged="$workspace/Staged.app"
 mkdir -p "$installed/Contents" "$staged/Contents"
 printf 'old\n' > "$installed/Contents/obsolete.txt"
@@ -27,7 +27,7 @@ helm_install_app_contents "$staged" "$installed" verify_current
 root_inode_after=$(stat -f '%i' "$installed")
 [[ "$root_inode_before" == "$root_inode_after" ]]
 verify_current "$installed"
-[[ -z $(find "$workspace" -maxdepth 1 -name '.Helm-Demo-rollback.*' -print -quit) ]]
+[[ -z $(find "$workspace" -maxdepth 1 -name '.GripPilot-rollback.*' -print -quit) ]]
 
 rejected="$workspace/Rejected.app"
 mkdir -p "$rejected/Contents"
@@ -45,6 +45,18 @@ fi
 [[ "$root_inode_before" == "$(stat -f '%i' "$installed")" ]]
 verify_current "$installed"
 [[ ! -e "$installed/Contents/rejected.txt" ]]
-[[ -z $(find "$workspace" -maxdepth 1 -name '.Helm-Demo-rollback.*' -print -quit) ]]
+[[ -z $(find "$workspace" -maxdepth 1 -name '.GripPilot-rollback.*' -print -quit) ]]
+
+outside="$workspace/Outside.app"
+linked="$workspace/Linked.app"
+mkdir -p "$outside/Contents"
+printf 'outside\n' > "$outside/Contents/current.txt"
+ln -s "$outside" "$linked"
+if helm_install_app_contents "$staged" "$linked" verify_current 2>/dev/null; then
+    echo "expected a symlink installation target to be rejected" >&2
+    exit 1
+fi
+[[ -L "$linked" ]]
+[[ $(<"$outside/Contents/current.txt") == "outside" ]]
 
 echo "IN_PLACE_INSTALL_TESTS=PASS"

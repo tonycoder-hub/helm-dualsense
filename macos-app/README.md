@@ -7,7 +7,7 @@ for button-controlled or always-on transcription.
 
 ## Try it
 
-1. Open `~/Applications/Helm Demo.app`.
+1. Open `~/Applications/GripPilot.app`.
 2. Connect the DualSense by USB-C for the first test. Bluetooth can follow;
    SDL enhanced reports stay in `auto` mode to avoid forcing a persistent
    controller report-mode change before the app actually needs it.
