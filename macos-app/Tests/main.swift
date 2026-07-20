@@ -1409,6 +1409,189 @@ func testVoiceSessionPoliciesCoverPermissionRefreshAndFinalization() {
 
 testVoiceSessionPoliciesCoverPermissionRefreshAndFinalization()
 
+func testMappingCaptureTreatsDeliveryAndAutomaticRestartAsActiveVoiceWork() {
+  expect(
+    VoiceSessionPolicy.isActiveForMappingCapture(
+      isListening: false,
+      isFinalizing: false,
+      deliveryInProgress: true,
+      restartPending: false,
+      hasPressOwner: false
+    ),
+    "mapping capture must cancel an asynchronous text delivery before recording buttons"
+  )
+  expect(
+    VoiceSessionPolicy.isActiveForMappingCapture(
+      isListening: false,
+      isFinalizing: false,
+      deliveryInProgress: false,
+      restartPending: true,
+      hasPressOwner: false
+    ),
+    "mapping capture must suspend a queued always-on restart"
+  )
+}
+
+testMappingCaptureTreatsDeliveryAndAutomaticRestartAsActiveVoiceWork()
+
+func testVoiceInputModesGatePhysicalAndAutomaticCapture() {
+  expect(
+    VoiceInputMode.defaultMode == .pushToTalk,
+    "upgrades must preserve push-to-talk as the default microphone mode"
+  )
+  expect(
+    VoiceInputMode.allCases == [.pushToTalk, .alwaysOn, .alwaysOff],
+    "the mode picker should present button, open, and closed states in a stable order"
+  )
+  expect(
+    VoiceInputMode.allCases.map(\.title) == ["按键模式", "常开", "常闭"],
+    "each microphone mode should have an unambiguous user-facing label"
+  )
+  expect(
+    VoiceInputMode.allCases.map(\.detail) == [
+      "按住手柄键说话，松开后提交",
+      "无需按键，自动分段提交并继续监听",
+      "禁止麦克风采集",
+    ],
+    "the mode picker should explain capture and commit semantics"
+  )
+  expect(
+    VoiceInputModePolicy.canBegin(mode: .pushToTalk, hasPressOwner: true),
+    "button mode should start while a PTT owner is held"
+  )
+  expect(
+    !VoiceInputModePolicy.canBegin(mode: .pushToTalk, hasPressOwner: false),
+    "button mode must not start after its PTT owner disappeared"
+  )
+  expect(
+    VoiceInputModePolicy.canBegin(mode: .alwaysOn, hasPressOwner: false),
+    "always-on mode should not require a held controller button"
+  )
+  expect(
+    !VoiceInputModePolicy.canBegin(mode: .alwaysOff, hasPressOwner: true),
+    "always-off mode must reject physical PTT presses"
+  )
+  expect(
+    VoiceInputMode.alwaysOn.automaticallyCommitsFinalRecognition,
+    "always-on recognition should commit a naturally finalized segment"
+  )
+  expect(
+    !VoiceInputMode.pushToTalk.automaticallyCommitsFinalRecognition,
+    "button mode should still wait for release before committing"
+  )
+}
+
+testVoiceInputModesGatePhysicalAndAutomaticCapture()
+
+func testVoiceModeTransitionsPreserveOrDiscardTheCurrentSegmentSafely() {
+  expect(
+    VoiceInputModePolicy.transition(
+      from: .pushToTalk,
+      to: .alwaysOn,
+      isListening: false,
+      isFinalizing: false,
+      deliveryInProgress: false
+    ) == .start,
+    "selecting always-on while idle should start capture"
+  )
+  expect(
+    VoiceInputModePolicy.transition(
+      from: .pushToTalk,
+      to: .alwaysOn,
+      isListening: true,
+      isFinalizing: false,
+      deliveryInProgress: false
+    ) == .keepListening,
+    "switching a live PTT session to always-on should keep the microphone running"
+  )
+  expect(
+    VoiceInputModePolicy.transition(
+      from: .alwaysOn,
+      to: .pushToTalk,
+      isListening: true,
+      isFinalizing: false,
+      deliveryInProgress: false
+    ) == .stopAndCommit,
+    "leaving always-on for button mode should preserve the current dictation"
+  )
+  expect(
+    VoiceInputModePolicy.transition(
+      from: .alwaysOn,
+      to: .alwaysOff,
+      isListening: true,
+      isFinalizing: false,
+      deliveryInProgress: false
+    ) == .stopWithoutCommit,
+    "selecting always-off should mute immediately without a late text injection"
+  )
+  expect(
+    VoiceInputModePolicy.transition(
+      from: .alwaysOn,
+      to: .alwaysOff,
+      isListening: false,
+      isFinalizing: true,
+      deliveryInProgress: true
+    ) == .stopWithoutCommit,
+    "always-off should cancel finalization and pending delivery as well as live capture"
+  )
+  expect(
+    VoiceInputModePolicy.transition(
+      from: .alwaysOff,
+      to: .alwaysOn,
+      isListening: false,
+      isFinalizing: true,
+      deliveryInProgress: false
+    ) == .restartAfterCompletion,
+    "always-on selected during finalization should wait before restarting capture"
+  )
+}
+
+testVoiceModeTransitionsPreserveOrDiscardTheCurrentSegmentSafely()
+
+func testAlwaysOnRestartsOnlyAfterSafeTerminalOutcomes() {
+  expect(
+    VoiceInputModePolicy.shouldRestartAlwaysOn(
+      mode: .alwaysOn,
+      outcome: .emptySegment
+    ),
+    "an empty rolling segment should resume listening"
+  )
+  expect(
+    VoiceInputModePolicy.shouldRestartAlwaysOn(
+      mode: .alwaysOn,
+      outcome: .confirmedDelivery
+    ),
+    "a confirmed external delivery should resume listening"
+  )
+  expect(
+    !VoiceInputModePolicy.shouldRestartAlwaysOn(
+      mode: .alwaysOn,
+      outcome: .unconfirmedDelivery
+    ),
+    "an unconfirmed dispatch should pause instead of risking text loss"
+  )
+  expect(
+    !VoiceInputModePolicy.shouldRestartAlwaysOn(
+      mode: .alwaysOn,
+      outcome: .failure
+    ),
+    "recognition or focus failure should not create an automatic restart loop"
+  )
+  expect(
+    !VoiceInputModePolicy.shouldRestartAlwaysOn(
+      mode: .pushToTalk,
+      outcome: .confirmedDelivery
+    ),
+    "button mode must never restart on its own"
+  )
+  expect(
+    (15.0...60.0).contains(VoiceInputModePolicy.maximumSegmentDuration),
+    "always-on rolling segments should be long enough for dictation and bounded for delivery"
+  )
+}
+
+testAlwaysOnRestartsOnlyAfterSafeTerminalOutcomes()
+
 func testPermissionDiagnosticsEmitOnlyTheInitialOrChangedSnapshot() {
   var tracker = PermissionDiagnosticTracker()
   let authorized = PermissionDiagnosticSnapshot(
@@ -1927,6 +2110,10 @@ func testPartialUnicodeDeliveryRetriesOnlyTheUndeliveredSuffix() {
   expect(
     UnicodeDeliveryProgress.remainingText(chunks: chunks, sentCount: 99).isEmpty,
     "a completed delivery must not retain phantom retry text"
+  )
+  expect(
+    UnicodeDeliveryProgress.completedUnconfirmedText(chunks: chunks) == "甲乙丙丁",
+    "a completed HID delivery must retain the whole unconfirmed transcript for manual retry"
   )
 }
 

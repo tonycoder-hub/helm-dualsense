@@ -57,8 +57,16 @@ final class AppModel: ObservableObject {
   @Published var microphoneAuthorization = AVCaptureDevice.authorizationStatus(for: .audio)
   @Published var speechAuthorization = SFSpeechRecognizer.authorizationStatus()
   @Published var isListening = false
+  @Published var voiceInputMode = VoiceInputMode.defaultMode {
+    didSet {
+      UserDefaults.standard.set(voiceInputMode.rawValue, forKey: "voiceInputMode")
+      if started, voiceInputMode != oldValue {
+        applyVoiceInputModeTransition(from: oldValue)
+      }
+    }
+  }
   @Published var lastAudioSampleRate = 0.0
-  @Published var transcript = "按住手柄麦克风键说话，识别结果会显示在这里。"
+  @Published var transcript = "选择麦克风模式后说话，识别结果会显示在这里。"
   @Published var autoInsert = true {
     didSet { UserDefaults.standard.set(autoInsert, forKey: "autoInsert") }
   }
@@ -151,7 +159,7 @@ final class AppModel: ObservableObject {
     }
   }
   @Published var latestInput = "等待手柄连接"
-  @Published var statusMessage = "Helm 已就绪；已连接手柄将按启动设置决定是否启用控制，录音仍需按下 PTT。"
+  @Published var statusMessage = "Helm 已就绪；桌面控制和麦克风模式可以分别配置。"
   @Published var activity: [String] = []
   @Published var audioDevices: [AudioInputDevice] = []
   @Published var selectedAudioDeviceID = AudioDeviceID(0)
@@ -219,6 +227,9 @@ final class AppModel: ObservableObject {
   private var audioRefreshGate = AudioRefreshGate()
   private var activeVoiceAudioDevice: AudioInputDevice?
   private var voiceFinalizing = false
+  private var alwaysOnSegmentWorkItem: DispatchWorkItem?
+  private var alwaysOnRestartWorkItem: DispatchWorkItem?
+  private var alwaysOnRestartPending = false
   private var focusHistory = ExternalFocusHistory()
   private var voiceTestFinishing = false
   private var suppressAutoInsertForCurrentVoice = false
@@ -289,6 +300,11 @@ final class AppModel: ObservableObject {
     }
     if defaults.object(forKey: "autoInsert") != nil {
       autoInsert = defaults.bool(forKey: "autoInsert")
+    }
+    if let rawMode = defaults.string(forKey: "voiceInputMode"),
+      let storedMode = VoiceInputMode(rawValue: rawMode)
+    {
+      voiceInputMode = storedMode
     }
     if defaults.object(forKey: "autoEnableControlsOnLaunch") != nil {
       autoEnableControlsOnLaunch = defaults.bool(forKey: "autoEnableControlsOnLaunch")
@@ -480,6 +496,10 @@ final class AppModel: ObservableObject {
   }
 
   func beginVoiceTest() {
+    guard voiceInputMode == .pushToTalk else {
+      setStatus("界面按住测试仅在按键模式可用。", log: true)
+      return
+    }
     activeVoiceTestToken = voiceTestGeneration.begin()
     voiceTestFinishing = false
     updatePushToTalkSource(
@@ -640,7 +660,13 @@ final class AppModel: ObservableObject {
   func beginMappingCapture(replacing chord: ControllerChord? = nil) {
     guard !isRecordingMapping else { return }
     motionSamplingDriver.disableOutputAndWait()
-    let voiceActive = isListening || voiceFinalizing || !pushToTalkSources.isEmpty
+    let voiceActive = VoiceSessionPolicy.isActiveForMappingCapture(
+      isListening: isListening,
+      isFinalizing: voiceFinalizing,
+      deliveryInProgress: activeVoiceDeliveryToken != nil,
+      restartPending: alwaysOnRestartPending,
+      hasPressOwner: !pushToTalkSources.isEmpty
+    )
     let plan = MappingCapturePolicy.begin(
       controlsEnabled: controlsEnabled,
       voiceActive: voiceActive,
@@ -709,11 +735,25 @@ final class AppModel: ObservableObject {
   private func requestSpeechPermissionIfNeeded() {
     guard speechAuthorization == .notDetermined else {
       refreshPermissionState()
+      startAlwaysOnAfterPermissionGrantIfNeeded()
       return
     }
     SFSpeechRecognizer.requestAuthorization { [weak self] _ in
-      Task { @MainActor in self?.refreshPermissionState() }
+      Task { @MainActor in
+        self?.refreshPermissionState()
+        self?.startAlwaysOnAfterPermissionGrantIfNeeded()
+      }
     }
+  }
+
+  private func startAlwaysOnAfterPermissionGrantIfNeeded() {
+    guard voiceInputMode == .alwaysOn,
+      voicePermissionsGranted,
+      !isListening,
+      !voiceFinalizing,
+      activeVoiceDeliveryToken == nil
+    else { return }
+    beginVoice(source: "语音权限已就绪")
   }
 
   private func eventTick() {
@@ -1056,12 +1096,133 @@ final class AppModel: ObservableObject {
     }
   }
 
+  private func applyVoiceInputModeTransition(from previousMode: VoiceInputMode) {
+    let action = VoiceInputModePolicy.transition(
+      from: previousMode,
+      to: voiceInputMode,
+      isListening: isListening,
+      isFinalizing: voiceFinalizing,
+      deliveryInProgress: activeVoiceDeliveryToken != nil
+    )
+    cancelAlwaysOnAutomation()
+    pushToTalkSources.removeAll()
+    invalidateVoiceTestSession()
+
+    switch action {
+    case .none:
+      let message = voiceInputMode == .alwaysOff
+        ? "麦克风已常闭；不会响应语音按键。"
+        : "麦克风已切换为按键模式。"
+      setStatus(message, log: true)
+    case .start:
+      beginVoice(source: "常开模式")
+    case .keepListening:
+      scheduleAlwaysOnSegmentCompletion()
+      setStatus("麦克风已切换为常开；当前语音会话保持运行。", log: true)
+    case .stopAndCommit:
+      endVoice(commit: true, source: "切换到按键模式")
+    case .stopWithoutCommit:
+      voice.cancelCurrent()
+      isListening = false
+      voiceFinalizing = false
+      activeVoiceAudioDevice = nil
+      invalidateVoiceTextDelivery()
+      suppressAutoInsertForCurrentVoice = false
+      updateLatencyActivity()
+      setStatus("麦克风已常闭；当前采集和待投递文本已取消。", log: true)
+    case .restartAfterCompletion:
+      alwaysOnRestartPending = true
+      restartAlwaysOnIfReady()
+      setStatus("当前语音正在收尾；完成后会进入常开模式。", log: true)
+    }
+  }
+
+  private func cancelAlwaysOnAutomation() {
+    alwaysOnSegmentWorkItem?.cancel()
+    alwaysOnSegmentWorkItem = nil
+    alwaysOnRestartWorkItem?.cancel()
+    alwaysOnRestartWorkItem = nil
+    alwaysOnRestartPending = false
+  }
+
+  private func scheduleAlwaysOnSegmentCompletion() {
+    alwaysOnSegmentWorkItem?.cancel()
+    guard voiceInputMode == .alwaysOn, isListening else {
+      alwaysOnSegmentWorkItem = nil
+      return
+    }
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self, self.voiceInputMode == .alwaysOn, self.isListening else { return }
+        self.setStatus("常开语音正在提交当前分段…", log: true)
+        self.endVoice(commit: true, source: "常开分段")
+      }
+    }
+    alwaysOnSegmentWorkItem = workItem
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + VoiceInputModePolicy.maximumSegmentDuration,
+      execute: workItem
+    )
+  }
+
+  private func completeVoiceDelivery(outcome: VoiceCompletionOutcome) {
+    invalidateVoiceTextDelivery()
+    guard VoiceInputModePolicy.shouldRestartAlwaysOn(
+      mode: voiceInputMode,
+      outcome: outcome
+    ) else {
+      alwaysOnRestartPending = false
+      return
+    }
+    alwaysOnRestartPending = true
+    restartAlwaysOnIfReady()
+  }
+
+  private func restartAlwaysOnIfReady() {
+    alwaysOnRestartWorkItem?.cancel()
+    alwaysOnRestartWorkItem = nil
+    guard alwaysOnRestartPending,
+      voiceInputMode == .alwaysOn,
+      !isRecordingMapping,
+      !isListening,
+      !voiceFinalizing,
+      activeVoiceDeliveryToken == nil
+    else { return }
+
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self,
+          self.alwaysOnRestartPending,
+          self.voiceInputMode == .alwaysOn,
+          !self.isRecordingMapping,
+          !self.isListening,
+          !self.voiceFinalizing,
+          self.activeVoiceDeliveryToken == nil
+        else { return }
+        self.alwaysOnRestartPending = false
+        self.alwaysOnRestartWorkItem = nil
+        self.beginVoice(source: "常开续段")
+      }
+    }
+    alwaysOnRestartWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+  }
+
   private func updatePushToTalkSource(
     _ source: UInt64,
     pressed: Bool,
     commitOnRelease: Bool,
     label: String
   ) {
+    guard voiceInputMode == .pushToTalk else {
+      if pressed {
+        let message = voiceInputMode == .alwaysOn
+          ? "麦克风已处于常开模式，无需按住语音键。"
+          : "麦克风处于常闭模式；切换到按键或常开后才能采集。"
+        setStatus(message, log: true)
+      }
+      return
+    }
     if pressed {
       let shouldStart = pushToTalkSources.isEmpty
       pushToTalkSources.insert(source)
@@ -1110,7 +1271,8 @@ final class AppModel: ObservableObject {
     guard !isListening else { return }
     refreshPermissionState()
     guard
-      VoiceSessionPolicy.canBeginAfterEnvironmentRefresh(
+      VoiceInputModePolicy.canBegin(
+        mode: voiceInputMode,
         hasPressOwner: !pushToTalkSources.isEmpty
       )
     else { return }
@@ -1131,7 +1293,7 @@ final class AppModel: ObservableObject {
 
     suppressAutoInsertForCurrentVoice = false
     voiceFinalizing = false
-    lastCompletedTranscript = nil
+    if voiceInputMode != .alwaysOn { lastCompletedTranscript = nil }
     manualDeliveryActivationBaseline = nil
     voiceInsertionProcessIdentity = nil
     voiceInsertionFocusSnapshot = nil
@@ -1170,6 +1332,8 @@ final class AppModel: ObservableObject {
       let sampleRate = try voice.start(
         deviceID: selectedAudioDeviceID,
         localeIdentifier: localeIdentifier,
+        automaticallyFinishOnFinalResult:
+          voiceInputMode.automaticallyCommitsFinalRecognition,
         onPartial: { [weak self] text in
           self?.transcript = text
         },
@@ -1179,13 +1343,12 @@ final class AppModel: ObservableObject {
       )
       lastAudioSampleRate = sampleRate
       activeVoiceAudioDevice = selectedDevice
-      transcript = "正在聆听…"
+      transcript = voiceInputMode == .alwaysOn ? "常开监听中…" : "正在聆听…"
       isListening = true
+      if voiceInputMode == .alwaysOn { scheduleAlwaysOnSegmentCompletion() }
       updateLatencyActivity()
-      setStatus(
-        "PTT 已开始（\(source) · \(selectedAudioDeviceName) · \(Int(sampleRate)) Hz）",
-        log: true
-      )
+      let prefix = voiceInputMode == .alwaysOn ? "麦克风常开" : "PTT 已开始"
+      setStatus("\(prefix)（\(source) · \(selectedAudioDeviceName) · \(Int(sampleRate)) Hz）", log: true)
       playHaptic(.voiceStart)
     } catch {
       activeVoiceAudioDevice = nil
@@ -1198,17 +1361,24 @@ final class AppModel: ObservableObject {
   }
 
   private func endVoice(commit: Bool, source: String) {
+    alwaysOnSegmentWorkItem?.cancel()
+    alwaysOnSegmentWorkItem = nil
     guard isListening else { return }
     if !commit { invalidateVoiceTextDelivery() }
     isListening = false
     voiceFinalizing = commit
     updateLatencyActivity()
-    setStatus(commit ? "PTT 已释放，正在完成识别…" : "PTT 已停止（\(source)）", log: true)
+    setStatus(
+      commit ? "语音采集已结束，正在完成识别…" : "麦克风已停止（\(source)）",
+      log: true
+    )
     playHaptic(.voiceStop)
     voice.stop(commit: commit)
   }
 
   private func voiceCompleted(text: String?, error: String?) {
+    alwaysOnSegmentWorkItem?.cancel()
+    alwaysOnSegmentWorkItem = nil
     isListening = false
     voiceFinalizing = false
     activeVoiceAudioDevice = nil
@@ -1221,24 +1391,27 @@ final class AppModel: ObservableObject {
       lastCompletedTranscript = text
       manualDeliveryActivationBaseline = focusHistory.activationGeneration
       if insertionSuppressed {
-        invalidateVoiceTextDelivery()
+        completeVoiceDelivery(outcome: .failure)
         setStatus("未能确认外部文本焦点；识别文本只保留在 Helm 中。", log: true)
       } else if autoInsert {
         if let deliveryToken {
           deliverRecognizedText(text, token: deliveryToken, attemptsRemaining: 12)
         } else {
+          completeVoiceDelivery(outcome: .failure)
           setStatus("语音目标会话已失效；文本保留在 Helm 中。", log: true)
         }
       } else {
-        invalidateVoiceTextDelivery()
-        setStatus("语音识别完成，自动写入已关闭。", log: true)
+        completeVoiceDelivery(outcome: .failure)
+        let suffix = voiceInputMode == .alwaysOn ? "；常开监听已暂停" : ""
+        setStatus("语音识别完成，自动写入已关闭\(suffix)。", log: true)
       }
     } else if let error, !error.isEmpty {
-      invalidateVoiceTextDelivery()
+      completeVoiceDelivery(outcome: .failure)
       setStatus("语音识别结束：\(error)", log: true)
     } else {
-      invalidateVoiceTextDelivery()
-      setStatus("没有识别到可用文本。", log: true)
+      completeVoiceDelivery(outcome: .emptySegment)
+      let suffix = voiceInputMode == .alwaysOn ? "，继续常开监听。" : "。"
+      setStatus("没有识别到可用文本\(suffix)", log: true)
     }
     nextAudioRefresh = 0
   }
@@ -1250,7 +1423,7 @@ final class AppModel: ObservableObject {
   ) {
     guard activeVoiceDeliveryToken == token, voiceDeliveryGeneration.accepts(token) else { return }
     guard !HelmSecureInputEnabled() else {
-      invalidateVoiceTextDelivery()
+      completeVoiceDelivery(outcome: .failure)
       setStatus("检测到系统安全输入；识别文本只保留在 Helm 中。", log: true)
       return
     }
@@ -1264,7 +1437,7 @@ final class AppModel: ObservableObject {
     )
 
     guard let target, target > 0, target != helmProcessIdentifier else {
-      invalidateVoiceTextDelivery()
+      completeVoiceDelivery(outcome: .failure)
       setStatus("未找到外部文本目标；识别文本只保留在 Helm 中。", log: true)
       return
     }
@@ -1277,7 +1450,7 @@ final class AppModel: ObservableObject {
     )
 
     guard focusResolution != .refuse else {
-      invalidateVoiceTextDelivery()
+      completeVoiceDelivery(outcome: .failure)
       setStatus("无法确认外部目标进程身份；为避免误写，文本保留在 Helm 中。", log: true)
       return
     }
@@ -1289,7 +1462,7 @@ final class AppModel: ObservableObject {
         let application = NSRunningApplication(processIdentifier: target),
         !application.isTerminated
       else {
-        invalidateVoiceTextDelivery()
+        completeVoiceDelivery(outcome: .failure)
         setStatus("外部目标应用未能恢复焦点；识别文本只保留在 Helm 中。", log: true)
         return
       }
@@ -1310,7 +1483,7 @@ final class AppModel: ObservableObject {
       guard let captured = voiceInsertionFocusSnapshot,
         captured.processIdentifier == target
       else {
-        invalidateVoiceTextDelivery()
+        completeVoiceDelivery(outcome: .failure)
         setStatus("已捕获的外部文本目标无效；识别文本只保留在 Helm 中。", log: true)
         return
       }
@@ -1389,7 +1562,7 @@ final class AppModel: ObservableObject {
         after: .confirmedInsertion,
         originalText: text
       )
-      invalidateVoiceTextDelivery()
+      completeVoiceDelivery(outcome: .confirmedDelivery)
       setStatus("识别文本已写入原外部文本框（\(method)）。", log: true)
     case .dispatched(let method):
       voiceDeliveryLogger.info(
@@ -1399,7 +1572,7 @@ final class AppModel: ObservableObject {
         after: .unconfirmedDispatch,
         originalText: text
       )
-      invalidateVoiceTextDelivery()
+      completeVoiceDelivery(outcome: .unconfirmedDelivery)
       setStatus("已向原外部文本框发送\(method)；请确认文本是否出现。", log: true)
     case .retryable(let reason):
       retryRecognizedTextDelivery(
@@ -1412,7 +1585,7 @@ final class AppModel: ObservableObject {
       voiceDeliveryLogger.info(
         "delivery result=refused targetPID=\(target, privacy: .public) reason=\(reason, privacy: .public)"
       )
-      invalidateVoiceTextDelivery()
+      completeVoiceDelivery(outcome: .failure)
       setStatus("\(reason)；文本保留在 Helm 中。", log: true)
     }
   }
@@ -1429,7 +1602,7 @@ final class AppModel: ObservableObject {
     guard let nextAttemptCount = VoiceTextDeliveryRetryPolicy.nextAttemptCount(
       from: attemptsRemaining
     ) else {
-      invalidateVoiceTextDelivery()
+      completeVoiceDelivery(outcome: .failure)
       setStatus("\(reason)；重试已用尽，文本保留在 Helm 中。", log: true)
       return
     }
@@ -1452,8 +1625,10 @@ final class AppModel: ObservableObject {
   ) {
     guard activeVoiceDeliveryToken == token, voiceDeliveryGeneration.accepts(token) else { return }
     guard index < chunks.count else {
-      invalidateVoiceTextDelivery()
-      setStatus("识别文本已逐字投递到原外部文本框（\(chunks.count) 个字素）。", log: true)
+      lastCompletedTranscript = UnicodeDeliveryProgress.completedUnconfirmedText(chunks: chunks)
+      completeVoiceDelivery(outcome: .unconfirmedDelivery)
+      let suffix = voiceInputMode == .alwaysOn ? "，常开监听已暂停" : ""
+      setStatus("已向原外部文本框逐字发送（\(chunks.count) 个字素）；请确认文本是否出现\(suffix)。", log: true)
       return
     }
     guard let expectedIdentity = voiceInsertionProcessIdentity,
@@ -1486,12 +1661,13 @@ final class AppModel: ObservableObject {
         sentCount: nextIndex
       )
       if nextIndex == chunks.count {
-        lastCompletedTranscript = nil
+        lastCompletedTranscript = UnicodeDeliveryProgress.completedUnconfirmedText(chunks: chunks)
         voiceDeliveryLogger.info(
           "delivery result=unicode-complete targetPID=\(target, privacy: .public) graphemes=\(chunks.count, privacy: .public)"
         )
-        invalidateVoiceTextDelivery()
-        setStatus("识别文本已逐字投递到原外部文本框（\(chunks.count) 个字素）。", log: true)
+        completeVoiceDelivery(outcome: .unconfirmedDelivery)
+        let suffix = voiceInputMode == .alwaysOn ? "，常开监听已暂停" : ""
+        setStatus("已向原外部文本框逐字发送（\(chunks.count) 个字素）；请确认文本是否出现\(suffix)。", log: true)
         return
       }
       lastCompletedTranscript = remaining
@@ -1552,7 +1728,7 @@ final class AppModel: ObservableObject {
     voiceDeliveryLogger.info(
       "delivery result=partial sent=\(safeSentCount, privacy: .public) total=\(chunks.count, privacy: .public) reason=\(reason, privacy: .public)"
     )
-    invalidateVoiceTextDelivery()
+    completeVoiceDelivery(outcome: .failure)
     if safeSentCount > 0 {
       setStatus(
         "逐字投递已中止：已发送 \(safeSentCount)/\(chunks.count) 个字素（\(reason)）；重发只会发送剩余部分。",
@@ -1591,6 +1767,7 @@ final class AppModel: ObservableObject {
     rightMouseSources.removeAll()
     releaseHeldShortcutModifiers()
     pushToTalkSources.removeAll()
+    cancelAlwaysOnAutomation()
     _ = bindingResolver.reset()
     cancelMappingCaptureState(resumeControls: false)
     voice.cancelCurrent()
@@ -1644,7 +1821,7 @@ final class AppModel: ObservableObject {
       queueLatestInput("已恢复 \(name)")
       setStatus(
         isListening
-          ? "有线手柄已从音频重枚举中恢复；PTT 与识别保持运行。"
+          ? "有线手柄已从音频重枚举中恢复；语音识别保持运行。"
           : "有线手柄已从音频重枚举中恢复。",
         log: true
       )
@@ -1758,7 +1935,7 @@ final class AppModel: ObservableObject {
       execute: workItem
     )
     queueLatestInput("USB 音频启动，等待同一手柄恢复")
-    setStatus("检测到有线手柄音频重枚举；保留 PTT，等待 1.2 秒内自动恢复。", log: true)
+    setStatus("检测到有线手柄音频重枚举；保留语音采集，等待 1.2 秒内自动恢复。", log: true)
     updateLatencyActivity()
   }
 
@@ -1826,6 +2003,8 @@ final class AppModel: ObservableObject {
   }
 
   private func stopVoiceForMappingCapture() {
+    let shouldResumeAlwaysOn = voiceInputMode == .alwaysOn
+    cancelAlwaysOnAutomation()
     voice.cancelCurrent()
     isListening = false
     voiceFinalizing = false
@@ -1834,6 +2013,7 @@ final class AppModel: ObservableObject {
     invalidateVoiceTestSession()
     invalidateVoiceTextDelivery()
     suppressAutoInsertForCurrentVoice = false
+    alwaysOnRestartPending = shouldResumeAlwaysOn
     updateLatencyActivity()
   }
 
@@ -1859,6 +2039,7 @@ final class AppModel: ObservableObject {
       InputInjector.beginPointerSession()
     }
     syncMotionConfiguration()
+    restartAlwaysOnIfReady()
   }
 
   private func queueLatestInput(_ message: String) {
@@ -1872,7 +2053,7 @@ final class AppModel: ObservableObject {
     if shouldRun, latencyActivity == nil {
       latencyActivity = ProcessInfo.processInfo.beginActivity(
         options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
-        reason: "Helm controller and push-to-talk input"
+        reason: "Helm controller and voice input"
       )
     } else if !shouldRun, let latencyActivity {
       ProcessInfo.processInfo.endActivity(latencyActivity)
@@ -1962,6 +2143,7 @@ final class AppModel: ObservableObject {
       isListening: isListening,
       isFinalizing: voiceFinalizing
     ), microphone != .authorized || speech != .authorized {
+      cancelAlwaysOnAutomation()
       voice.cancelCurrent()
       isListening = false
       voiceFinalizing = false
@@ -1971,7 +2153,7 @@ final class AppModel: ObservableObject {
       invalidateVoiceTextDelivery()
       suppressAutoInsertForCurrentVoice = false
       updateLatencyActivity()
-      setStatus("语音权限已失效，PTT 已安全停止。", log: true)
+      setStatus("语音权限已失效，语音采集已安全停止。", log: true)
     }
   }
 
@@ -1991,6 +2173,7 @@ final class AppModel: ObservableObject {
 
   private func applyAudioDevices(_ fetchedDevices: [AudioInputDevice]) {
     guard pendingReconnectIdentity == nil else { return }
+    let initializedSelectionNow = !audioSelectionInitialized
     var refreshed = fetchedDevices
     let previousSelection = selectedAudioDeviceID
     let previousDevice = audioDevices.first(where: { $0.id == previousSelection })
@@ -2031,6 +2214,7 @@ final class AppModel: ObservableObject {
         isListening: isListening,
         isFinalizing: voiceFinalizing
       ) {
+        cancelAlwaysOnAutomation()
         voice.cancelCurrent()
         isListening = false
         voiceFinalizing = false
@@ -2040,11 +2224,19 @@ final class AppModel: ObservableObject {
         invalidateVoiceTextDelivery()
         suppressAutoInsertForCurrentVoice = false
         updateLatencyActivity()
-        setStatus("选择的麦克风已拔出，PTT 已停止；未自动切换。", log: true)
+        setStatus("选择的麦克风已拔出，语音采集已停止；未自动切换。", log: true)
       }
       selectedAudioDeviceID = 0
     }
     if protectPlaybackAudio { enforcePlaybackProtection(announce: false) }
+    if initializedSelectionNow,
+      voiceInputMode == .alwaysOn,
+      !isListening,
+      !voiceFinalizing,
+      activeVoiceDeliveryToken == nil
+    {
+      beginVoice(source: "启动常开模式")
+    }
   }
 
   private func enforcePlaybackProtection(announce: Bool) {
@@ -2058,6 +2250,7 @@ final class AppModel: ObservableObject {
       )
     else { return }
     if plan.shouldStopCapture {
+      cancelAlwaysOnAutomation()
       voice.cancelCurrent()
       isListening = false
       voiceFinalizing = false

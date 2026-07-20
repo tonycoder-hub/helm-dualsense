@@ -16,7 +16,7 @@ or Nintendo controller into one compact desktop controller.
 | Right stick up/down | Smooth scrolling |
 | L2 / R2 | Brake / accelerate pointer and scrolling |
 | D-pad up/down | Page navigation |
-| Microphone button | Push to talk |
+| Microphone button | Voice input in button mode |
 | Options + touchpad within two seconds | Emergency stop only |
 
 Pointer speed is adjustable in the app. The left stick uses a radial dead zone
@@ -39,6 +39,15 @@ chord is intentionally fixed, cannot be remapped, and never enables controls.
 L2 acts like a racing-game brake and R2 acts like an accelerator. Their minimum
 and maximum multipliers are configurable and apply to left-stick/touchpad
 pointer movement and right-stick scrolling.
+
+Voice input has three persistent modes. **Button mode** is the default and
+keeps the existing hold-to-talk behavior. **Always on** starts capture without
+a held controller button, commits when Apple Speech closes a phrase or after a
+30-second rolling segment, and resumes after an empty segment or a confirmed
+external-text insertion. It pauses after a recognition or delivery failure so
+the transcript cannot be silently lost. **Always off** blocks new capture and
+immediately cancels the active capture or pending text delivery. The mode can
+be switched from either the control center or the menu bar panel.
 
 Input processing is locked to a 240 Hz high-priority active cadence. A
 low-latency radial response floor, configurable response and smoothing
@@ -69,7 +78,8 @@ adaptive-trigger effects are intentionally a separate future feature. See the
   manual stop. Sleep/timer gaps, permission loss, disconnect, app termination,
   and the emergency chord still release all held actions immediately.
 - Accessibility, Microphone, and Speech permissions are requested only after an
-  explicit action in the visible UI.
+  explicit action in the visible UI. A previously selected always-on mode may
+  resume on a later launch after those permissions have already been granted.
 - Pending Speech callbacks are cancelled on emergency stop.
 - Microphone and Speech permissions are requested sequentially, and an
   interrupted on-screen PTT test is cancelled instead of remaining stuck.
@@ -90,7 +100,8 @@ adaptive-trigger effects are intentionally a separate future feature. See the
 
 ## Voice limitation
 
-The controller microphone/share/capture button can be used as the PTT control.
+The controller microphone/share/capture button can be used as the voice control
+in button mode.
 Audio is captured from the macOS input explicitly selected in Helm. On the
 target Mac, a wired DualSense currently enumerates as a 48 kHz USB input. Helm
 recognizes that route and tolerates one bounded HID re-enumeration without
@@ -128,7 +139,8 @@ again or use the clipboard.
 The public Demo update channel uses manually dispatched GitHub Releases with a
 signed Sparkle appcast. Updates are verified before extraction, signed-feed
 failures never expire into an unsigned fallback, and background checks remain
-disabled. Its ad-hoc signature
+disabled. **Check for Updates** is available in the main header and menu bar
+panel. Its ad-hoc signature
 is for testing and is not a substitute for Developer ID signing or Apple
 notarization. See the [release and update contract](docs/release-and-updates.md)
 for the separate formal-release gates.

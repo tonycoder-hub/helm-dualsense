@@ -46,6 +46,10 @@ enum UnicodeDeliveryProgress {
     let safeCount = min(max(sentCount, 0), chunks.count)
     return chunks.dropFirst(safeCount).joined()
   }
+
+  static func completedUnconfirmedText(chunks: [String]) -> String {
+    chunks.joined()
+  }
 }
 
 enum AccessibilityTextWriteVerification: Equatable {

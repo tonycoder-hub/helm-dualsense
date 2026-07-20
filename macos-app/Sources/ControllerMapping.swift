@@ -453,6 +453,105 @@ enum VoiceSessionPolicy {
   static func isActiveForReconnect(isListening: Bool, isFinalizing: Bool) -> Bool {
     isListening || isFinalizing
   }
+
+  static func isActiveForMappingCapture(
+    isListening: Bool,
+    isFinalizing: Bool,
+    deliveryInProgress: Bool,
+    restartPending: Bool,
+    hasPressOwner: Bool
+  ) -> Bool {
+    isListening || isFinalizing || deliveryInProgress || restartPending || hasPressOwner
+  }
+}
+
+enum VoiceInputMode: String, Codable, CaseIterable, Identifiable {
+  case pushToTalk
+  case alwaysOn
+  case alwaysOff
+
+  static let defaultMode = VoiceInputMode.pushToTalk
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .pushToTalk: return "按键模式"
+    case .alwaysOn: return "常开"
+    case .alwaysOff: return "常闭"
+    }
+  }
+
+  var detail: String {
+    switch self {
+    case .pushToTalk: return "按住手柄键说话，松开后提交"
+    case .alwaysOn: return "无需按键，自动分段提交并继续监听"
+    case .alwaysOff: return "禁止麦克风采集"
+    }
+  }
+
+  var automaticallyCommitsFinalRecognition: Bool {
+    self == .alwaysOn
+  }
+}
+
+enum VoiceModeTransitionAction: Equatable {
+  case none
+  case start
+  case keepListening
+  case stopAndCommit
+  case stopWithoutCommit
+  case restartAfterCompletion
+}
+
+enum VoiceCompletionOutcome: Equatable {
+  case emptySegment
+  case confirmedDelivery
+  case unconfirmedDelivery
+  case failure
+}
+
+enum VoiceInputModePolicy {
+  static let maximumSegmentDuration: TimeInterval = 30
+
+  static func canBegin(mode: VoiceInputMode, hasPressOwner: Bool) -> Bool {
+    switch mode {
+    case .pushToTalk: return hasPressOwner
+    case .alwaysOn: return true
+    case .alwaysOff: return false
+    }
+  }
+
+  static func transition(
+    from previousMode: VoiceInputMode,
+    to mode: VoiceInputMode,
+    isListening: Bool,
+    isFinalizing: Bool,
+    deliveryInProgress: Bool
+  ) -> VoiceModeTransitionAction {
+    guard mode != previousMode else { return .none }
+    switch mode {
+    case .alwaysOff:
+      return isListening || isFinalizing || deliveryInProgress ? .stopWithoutCommit : .none
+    case .pushToTalk:
+      return previousMode == .alwaysOn && isListening ? .stopAndCommit : .none
+    case .alwaysOn:
+      if isListening { return .keepListening }
+      if isFinalizing || deliveryInProgress { return .restartAfterCompletion }
+      return .start
+    }
+  }
+
+  static func shouldRestartAlwaysOn(
+    mode: VoiceInputMode,
+    outcome: VoiceCompletionOutcome
+  ) -> Bool {
+    guard mode == .alwaysOn else { return false }
+    switch outcome {
+    case .emptySegment, .confirmedDelivery: return true
+    case .unconfirmedDelivery, .failure: return false
+    }
+  }
 }
 
 enum ControllerReconnectPolicy {

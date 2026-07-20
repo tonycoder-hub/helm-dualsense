@@ -3,7 +3,7 @@
 This is the local SwiftUI demo for controlling macOS with PlayStation, Xbox,
 and Nintendo controllers. It uses SDL3 for buttons, paddles and touch contacts,
 CoreGraphics for pointer/click/scroll output, and AVFoundation + Apple Speech
-for push-to-talk transcription.
+for button-controlled or always-on transcription.
 
 ## Try it
 
@@ -18,7 +18,7 @@ for push-to-talk transcription.
    launch toggle if you prefer an explicit **Enable Controls** click.
 5. Use the left stick for the main pointer, the touchpad for precision, and
    Cross/Circle for click or hold-to-drag. The right stick scrolls, D-pad pages,
-   and the microphone button controls PTT. L2 brakes pointer/scroll speed and R2
+   and the microphone button controls speech in button mode. L2 brakes pointer/scroll speed and R2
    accelerates it.
 6. Press Options and the touchpad button within two seconds, in either order,
    to emergency-stop controls. This gesture never enables controls.
@@ -68,6 +68,15 @@ field again and then use **重新发送到外部焦点**. This explicit recovery
 consumes that post-recognition activation, validates both the target PID and
 process launch time on every retry, uses the same secure-input checks, waits for
 any automatic delivery to finish, and does not capture audio again.
+
+The microphone selector has three persistent modes. **Button mode** is the
+default and keeps hold-to-talk semantics. **Always on** begins without a held
+button, commits a natural final result or a rolling 30-second segment, then
+continues only after an empty segment or confirmed external insertion. It
+pauses on an unconfirmed dispatch, recognition failure, or delivery failure so
+recognized text is not silently discarded. **Always off** refuses new capture
+and cancels active capture plus pending delivery immediately. Both the main
+window and menu bar panel expose the selector.
 
 The target Mac currently exposes a wired DualSense as a 48 kHz USB audio input.
 When that route briefly re-enumerates the controller HID while PTT starts, Helm
@@ -145,7 +154,8 @@ The Demo includes `SUFeedURL`, `SUPublicEDKey`, signed-feed enforcement,
 pre-extraction verification, and non-expiring signature failures for the GitHub
 Releases channel. Automatic background checks remain disabled;
 users initiate checks explicitly in Helm. Before the first GitHub Release is
-published, the stable `latest` feed URL can return no feed.
+published, the stable `latest` feed URL can return no feed. The manual update
+action is visible in the main window header and menu bar panel.
 After a formal artifact is produced, verify it with the ZIP, current signed
 appcast, and the exact prior signed appcast archived with the preceding
 immutable release:

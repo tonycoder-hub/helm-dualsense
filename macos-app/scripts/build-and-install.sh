@@ -103,6 +103,8 @@ xcrun swiftc \
 
 bash "$app_root/Tests/local-update-identity-tests.sh"
 bash "$app_root/Tests/in-place-install-tests.sh"
+bash "$app_root/Tests/prominent-update-control-tests.sh"
+bash "$app_root/Tests/voice-input-mode-contract-tests.sh"
 
 xcrun clang \
     -std=c11 \
