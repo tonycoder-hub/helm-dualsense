@@ -24,6 +24,7 @@ final class VoiceService {
   func start(
     deviceID: AudioDeviceID,
     localeIdentifier: String,
+    automaticallyFinishOnFinalResult: Bool = false,
     onPartial: @escaping @MainActor (String) -> Void,
     onComplete: @escaping @MainActor (String?, String?) -> Void
   ) throws -> Double {
@@ -67,7 +68,13 @@ final class VoiceService {
           self.onPartial?(text)
           if result.isFinal {
             self.recognitionEnded = true
-            if self.stopRequested { self.finish(error: nil, session: session) }
+            if automaticallyFinishOnFinalResult {
+              self.shouldCommit = true
+              self.stopRequested = true
+              self.finish(error: nil, session: session)
+            } else if self.stopRequested {
+              self.finish(error: nil, session: session)
+            }
             return
           }
         }

@@ -26,7 +26,8 @@ Sparkle over standard input, and publishes immutable versioned assets through
 GitHub Releases. The appcast
 enclosure uses the versioned release URL while the app reads the stable
 `releases/latest/download/appcast.xml` URL. Background update checks remain
-disabled, so users initiate checks explicitly.
+disabled, so users initiate checks explicitly from the main-window header or
+menu bar panel.
 
 Repository governance requires pull requests plus both the `release-contract`
 and full `core-build` checks for normal changes to `main`, resolves review
@@ -137,6 +138,11 @@ key is never embedded in the app or repository.
 The first release has no in-app predecessor to update. Starting with the next
 release, upgrade testing must cover the last public version and a deliberately
 interrupted download.
+
+For Demo 0.10.1, the monotonic upgrade path is 0.10.0 build 26 to 0.10.1 build
+27. The release check must reject a feed that does not strictly increase that
+build number, and the visible manual update actions must remain available in
+both the primary header and menu bar panel.
 
 Before the first formal release, create an offline genesis appcast containing a
 single `sparkle:version="0"` enclosure, sign the XML with the newly created

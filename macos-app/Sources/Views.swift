@@ -64,7 +64,12 @@ struct ControlCenterView: View {
           .foregroundStyle(.secondary)
       }
       Spacer()
-          Text("DEMO 0.10.0")
+      Button("检查更新") { model.checkForUpdates() }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(!model.canCheckForUpdates)
+        .help(model.updateChannelLabel)
+      Text("DEMO 0.10.1")
         .font(.caption.weight(.bold))
         .foregroundStyle(helmAccent)
         .padding(.horizontal, 10)
@@ -89,8 +94,9 @@ struct ControlCenterView: View {
       )
       StatusPill(
         title: "语音",
-        value: model.isListening ? "正在聆听" : "待机",
-        systemImage: model.isListening ? "waveform" : "mic",
+        value: model.isListening ? "正在聆听" : model.voiceInputMode.title,
+        systemImage: model.isListening
+          ? "waveform" : (model.voiceInputMode == .alwaysOff ? "mic.slash" : "mic"),
         color: model.isListening ? .red : .secondary
       )
     }
@@ -379,7 +385,7 @@ struct ControlCenterView: View {
           )
           .foregroundStyle(model.hapticsAvailable ? helmAccent : .secondary)
           Spacer()
-          Text("启用、点击、翻页、快捷键与 PTT 才触发；连续移动不震动")
+          Text("启用、点击、翻页、快捷键与语音开始/停止才触发；连续移动不震动")
             .foregroundStyle(.tertiary)
         }
         .font(.caption)
@@ -435,6 +441,24 @@ struct ControlCenterView: View {
         Toggle("释放后写入当前文本框", isOn: $model.autoInsert)
           .toggleStyle(.switch)
           .controlSize(.small)
+      }
+
+      VStack(alignment: .leading, spacing: 7) {
+        Text("麦克风模式")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        Picker("麦克风模式", selection: $model.voiceInputMode) {
+          ForEach(VoiceInputMode.allCases) { mode in
+            Text(mode.title).tag(mode)
+          }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        Text(model.voiceInputMode.detail)
+          .font(.caption)
+          .foregroundStyle(
+            model.voiceInputMode == .alwaysOff ? Color.orange : Color.secondary
+          )
       }
 
       HStack(spacing: 12) {
@@ -532,7 +556,7 @@ struct ControlCenterView: View {
       .font(.caption)
       .foregroundStyle(.secondary)
 
-      Text("手柄 PTT 独立于“桌面控制”开关；即使鼠标注入停用，也可以在外部应用保持焦点时按住映射键说话。")
+      Text("按键模式独立于“桌面控制”开关；常开会安全分段并在确认写入后继续监听，常闭会立即取消采集和待投递文本。")
         .font(.caption)
         .foregroundStyle(.tertiary)
       Text("若自动写入未出现：识别完成后重新在目标文本框点一下，返回 Helm 点击“重新发送到外部焦点”；这不会重新录音。")
@@ -571,11 +595,6 @@ struct ControlCenterView: View {
             Button("打开辅助功能设置") { model.openAccessibilitySettings() }
             Button("打开声音设置") { model.openSoundSettings() }
             Spacer()
-            Label(model.updateChannelLabel, systemImage: "arrow.triangle.2.circlepath")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-            Button("检查更新") { model.checkForUpdates() }
-              .disabled(!model.canCheckForUpdates)
           }
           .buttonStyle(.link)
         }
@@ -614,6 +633,13 @@ struct MenuBarPanel: View {
           .lineLimit(2)
       }
 
+      Picker("麦克风", selection: $model.voiceInputMode) {
+        ForEach(VoiceInputMode.allCases) { mode in
+          Text(mode.title).tag(mode)
+        }
+      }
+      .pickerStyle(.segmented)
+
       Button(action: model.toggleControls) {
         Label(
           model.controlsEnabled ? "立即停止" : "启用控制",
@@ -625,6 +651,8 @@ struct MenuBarPanel: View {
       .tint(model.controlsEnabled ? .red : helmAccent)
 
       Divider()
+      Button("检查更新") { model.checkForUpdates() }
+        .disabled(!model.canCheckForUpdates)
       Button("打开控制中心") {
         openWindow(id: "control-center")
         NSApp.activate(ignoringOtherApps: true)
@@ -916,14 +944,23 @@ private struct HoldToTalkButton: View {
   @State private var pressed = false
 
   var body: some View {
-    Label(model.isListening ? "松开完成" : "按住测试", systemImage: "mic.fill")
+    let enabled = model.voiceInputMode == .pushToTalk
+    Label(
+      enabled ? (model.isListening ? "松开完成" : "按住测试") : model.voiceInputMode.title,
+      systemImage: enabled ? "mic.fill" : "mic.slash.fill"
+    )
       .font(.subheadline.weight(.semibold))
       .foregroundStyle(.white)
       .padding(.horizontal, 14)
       .frame(height: 34)
-      .background(model.isListening ? Color.red : helmBlue, in: RoundedRectangle(cornerRadius: 9))
+      .background(
+        enabled ? (model.isListening ? Color.red : helmBlue) : Color.secondary,
+        in: RoundedRectangle(cornerRadius: 9)
+      )
       .scaleEffect(pressed ? 0.97 : 1)
+      .opacity(enabled ? 1 : 0.65)
       .contentShape(Rectangle())
+      .allowsHitTesting(enabled)
       .gesture(
         DragGesture(minimumDistance: 0)
           .onChanged { _ in
@@ -942,8 +979,15 @@ private struct HoldToTalkButton: View {
       ) { _ in
         cancelIfPressed()
       }
+      .onChange(of: model.voiceInputMode) { _, _ in
+        pressed = false
+      }
       .onDisappear { cancelIfPressed() }
-      .help("无需手柄即可测试当前麦克风与语音识别")
+      .help(
+        enabled
+          ? "无需手柄即可测试当前麦克风与语音识别"
+          : "切换到按键模式后可使用按住测试"
+      )
   }
 
   private func cancelIfPressed() {
