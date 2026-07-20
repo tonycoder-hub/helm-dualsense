@@ -1,4 +1,4 @@
-# Helm Demo for macOS
+# GripPilot for macOS
 
 This is the local SwiftUI demo for controlling macOS with PlayStation, Xbox,
 and Nintendo controllers. It uses SDL3 for buttons, paddles and touch contacts,
@@ -11,9 +11,9 @@ for button-controlled or always-on transcription.
 2. Connect the DualSense by USB-C for the first test. Bluetooth can follow;
    SDL enhanced reports stay in `auto` mode to avoid forcing a persistent
    controller report-mode change before the app actually needs it.
-3. In Helm, grant Accessibility, Microphone, and Speech Recognition only when
+3. In GripPilot, grant Accessibility, Microphone, and Speech Recognition only when
    you are ready to test them.
-4. If the controller was already connected when Helm launched, controls enable
+4. If the controller was already connected when GripPilot launched, controls enable
    automatically by default after Accessibility is available. Turn off the
    launch toggle if you prefer an explicit **Enable Controls** click.
 5. Use the left stick for the main pointer, the touchpad for precision, and
@@ -47,7 +47,7 @@ feel still require separate real-controller validation.
 The **Hold to Test** control lets you test microphone selection and speech
 recognition without a controller, then returns to the last external foreground
 application before committing text. If that focus cannot be restored and
-confirmed within 0.5 seconds, transcription is retained in Helm and automatic
+confirmed within 0.5 seconds, transcription is retained in GripPilot and automatic
 insertion is suppressed. Text insertion first uses the focused
 Accessibility element and falls back to Unicode keyboard events only after the
 focused element PID matches the process identity captured at PTT start,
@@ -56,14 +56,14 @@ editors that expose generic AX roles. The physical PTT path keeps that captured
 target for the whole recognition session, revalidates it immediately before
 delivery, then uses a global HID Unicode event so web/Electron editors receive
 the same route as normal keyboard input.
-If UI PTT could not capture an AX element while Helm was frontmost, completion
+If UI PTT could not capture an AX element while GripPilot was frontmost, completion
 reactivates the exact original process and recaptures its current focused text
 element; it never substitutes another process or replaces a valid earlier
 snapshot.
 Unicode event delivery is shown as unconfirmed because a target
 application may ignore it. Secure fields and system secure-input mode are
 refused. It never uses the clipboard as a hidden fallback.
-If a completed transcript remains in Helm, activate the intended external text
+If a completed transcript remains in GripPilot, activate the intended external text
 field again and then use **重新发送到外部焦点**. This explicit recovery path
 consumes that post-recognition activation, validates both the target PID and
 process launch time on every retry, uses the same secure-input checks, waits for
@@ -79,7 +79,7 @@ and cancels active capture plus pending delivery immediately. Both the main
 window and menu bar panel expose the selector.
 
 The target Mac currently exposes a wired DualSense as a 48 kHz USB audio input.
-When that route briefly re-enumerates the controller HID while PTT starts, Helm
+When that route briefly re-enumerates the controller HID while PTT starts, GripPilot
 releases held pointer actions immediately but preserves recognition for a
 bounded same-controller reconnect. The visible microphone picker remains the
 source of truth; Bluetooth controller audio is not treated as a music-safe
@@ -153,7 +153,7 @@ malformed percent escape. The release scripts report these as explicit gates.
 The Demo includes `SUFeedURL`, `SUPublicEDKey`, signed-feed enforcement,
 pre-extraction verification, and non-expiring signature failures for the GitHub
 Releases channel. Automatic background checks remain disabled;
-users initiate checks explicitly in Helm. Before the first GitHub Release is
+users initiate checks explicitly in GripPilot. Before the first GitHub Release is
 published, the stable `latest` feed URL can return no feed. The manual update
 action is visible in the main window header and menu bar panel.
 After a formal artifact is produced, verify it with the ZIP, current signed

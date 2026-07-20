@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>Helm Demo</string>
+    <string>GripPilot</string>
     <key>CFBundleExecutable</key>
     <string>HelmDemo</string>
     <key>CFBundleIdentifier</key>
@@ -13,13 +13,15 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Helm Demo</string>
+    <string>GripPilot</string>
+    <key>CFBundleIconFile</key>
+    <string>GripPilot.icns</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.10.1</string>
+    <string>0.11.0</string>
     <key>CFBundleVersion</key>
-    <string>27</string>
+    <string>28</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
@@ -45,8 +47,8 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Helm 会按你选择的按键或常开模式，使用所选麦克风进行语音输入；常闭模式不会采集音频。</string>
+    <string>GripPilot 会按你选择的按键或常开模式，使用所选麦克风进行语音输入；常闭模式不会采集音频。</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Helm 使用 Apple 语音识别将按键或常开模式下的音频转换为文字。</string>
+    <string>GripPilot 使用 Apple 语音识别将按键或常开模式下的音频转换为文字。</string>
 </dict>
 </plist>

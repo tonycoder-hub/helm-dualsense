@@ -159,7 +159,7 @@ final class AppModel: ObservableObject {
     }
   }
   @Published var latestInput = "等待手柄连接"
-  @Published var statusMessage = "Helm 已就绪；桌面控制和麦克风模式可以分别配置。"
+  @Published var statusMessage = "GripPilot 已就绪；桌面控制和麦克风模式可以分别配置。"
   @Published var activity: [String] = []
   @Published var audioDevices: [AudioInputDevice] = []
   @Published var selectedAudioDeviceID = AudioDeviceID(0)
@@ -456,9 +456,9 @@ final class AppModel: ObservableObject {
     guard accessibilityGranted else {
       if promptForAccessibility {
         _ = InputInjector.accessibilityTrusted(prompt: true)
-        setStatus("请在系统设置中允许 Helm Demo 使用辅助功能，然后再次启用。", log: true)
+        setStatus("请在系统设置中允许 GripPilot 使用辅助功能，然后再次启用。", log: true)
       } else {
-        setStatus("请先从 Helm 界面请求辅助功能权限，再使用手柄启用控制。", log: true)
+        setStatus("请先从 GripPilot 界面请求辅助功能权限，再使用手柄启用控制。", log: true)
       }
       return
     }
@@ -473,7 +473,7 @@ final class AppModel: ObservableObject {
 
   func requestAccessibility() {
     _ = InputInjector.accessibilityTrusted(prompt: true)
-    setStatus("已打开辅助功能授权流程。授权后返回 Helm 并点“刷新”。", log: true)
+    setStatus("已打开辅助功能授权流程。授权后返回 GripPilot 并点“刷新”。", log: true)
   }
 
   func requestVoicePermissions() {
@@ -523,7 +523,7 @@ final class AppModel: ObservableObject {
         commitOnRelease: true,
         label: "界面测试"
       )
-      setStatus("未找到可恢复的外部文本焦点；识别结果只会保留在 Helm 中。", log: true)
+      setStatus("未找到可恢复的外部文本焦点；识别结果只会保留在 GripPilot 中。", log: true)
       return
     }
     voiceTestFinishing = true
@@ -579,7 +579,7 @@ final class AppModel: ObservableObject {
       let activationBaseline = manualDeliveryActivationBaseline,
       let targetIdentity = focusHistory.manualRetryTarget(after: activationBaseline)
     else {
-      setStatus("请在识别完成后重新聚焦外部文本框，再返回 Helm 发送。", log: true)
+      setStatus("请在识别完成后重新聚焦外部文本框，再返回 GripPilot 发送。", log: true)
       return
     }
 
@@ -1392,13 +1392,13 @@ final class AppModel: ObservableObject {
       manualDeliveryActivationBaseline = focusHistory.activationGeneration
       if insertionSuppressed {
         completeVoiceDelivery(outcome: .failure)
-        setStatus("未能确认外部文本焦点；识别文本只保留在 Helm 中。", log: true)
+        setStatus("未能确认外部文本焦点；识别文本只保留在 GripPilot 中。", log: true)
       } else if autoInsert {
         if let deliveryToken {
           deliverRecognizedText(text, token: deliveryToken, attemptsRemaining: 12)
         } else {
           completeVoiceDelivery(outcome: .failure)
-          setStatus("语音目标会话已失效；文本保留在 Helm 中。", log: true)
+          setStatus("语音目标会话已失效；文本保留在 GripPilot 中。", log: true)
         }
       } else {
         completeVoiceDelivery(outcome: .failure)
@@ -1424,7 +1424,7 @@ final class AppModel: ObservableObject {
     guard activeVoiceDeliveryToken == token, voiceDeliveryGeneration.accepts(token) else { return }
     guard !HelmSecureInputEnabled() else {
       completeVoiceDelivery(outcome: .failure)
-      setStatus("检测到系统安全输入；识别文本只保留在 Helm 中。", log: true)
+      setStatus("检测到系统安全输入；识别文本只保留在 GripPilot 中。", log: true)
       return
     }
     let helmProcessIdentifier = ProcessInfo.processInfo.processIdentifier
@@ -1438,7 +1438,7 @@ final class AppModel: ObservableObject {
 
     guard let target, target > 0, target != helmProcessIdentifier else {
       completeVoiceDelivery(outcome: .failure)
-      setStatus("未找到外部文本目标；识别文本只保留在 Helm 中。", log: true)
+      setStatus("未找到外部文本目标；识别文本只保留在 GripPilot 中。", log: true)
       return
     }
 
@@ -1451,7 +1451,7 @@ final class AppModel: ObservableObject {
 
     guard focusResolution != .refuse else {
       completeVoiceDelivery(outcome: .failure)
-      setStatus("无法确认外部目标进程身份；为避免误写，文本保留在 Helm 中。", log: true)
+      setStatus("无法确认外部目标进程身份；为避免误写，文本保留在 GripPilot 中。", log: true)
       return
     }
 
@@ -1463,7 +1463,7 @@ final class AppModel: ObservableObject {
         !application.isTerminated
       else {
         completeVoiceDelivery(outcome: .failure)
-        setStatus("外部目标应用未能恢复焦点；识别文本只保留在 Helm 中。", log: true)
+        setStatus("外部目标应用未能恢复焦点；识别文本只保留在 GripPilot 中。", log: true)
         return
       }
       _ = application.activate(options: [.activateAllWindows])
@@ -1484,7 +1484,7 @@ final class AppModel: ObservableObject {
         captured.processIdentifier == target
       else {
         completeVoiceDelivery(outcome: .failure)
-        setStatus("已捕获的外部文本目标无效；识别文本只保留在 Helm 中。", log: true)
+        setStatus("已捕获的外部文本目标无效；识别文本只保留在 GripPilot 中。", log: true)
         return
       }
       snapshot = captured
@@ -1586,7 +1586,7 @@ final class AppModel: ObservableObject {
         "delivery result=refused targetPID=\(target, privacy: .public) reason=\(reason, privacy: .public)"
       )
       completeVoiceDelivery(outcome: .failure)
-      setStatus("\(reason)；文本保留在 Helm 中。", log: true)
+      setStatus("\(reason)；文本保留在 GripPilot 中。", log: true)
     }
   }
 
@@ -1603,7 +1603,7 @@ final class AppModel: ObservableObject {
       from: attemptsRemaining
     ) else {
       completeVoiceDelivery(outcome: .failure)
-      setStatus("\(reason)；重试已用尽，文本保留在 Helm 中。", log: true)
+      setStatus("\(reason)；重试已用尽，文本保留在 GripPilot 中。", log: true)
       return
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
@@ -1735,7 +1735,7 @@ final class AppModel: ObservableObject {
         log: true
       )
     } else {
-      setStatus("逐字投递未开始（\(reason)）；文本保留在 Helm 中。", log: true)
+      setStatus("逐字投递未开始（\(reason)）；文本保留在 GripPilot 中。", log: true)
     }
   }
 
@@ -2053,7 +2053,7 @@ final class AppModel: ObservableObject {
     if shouldRun, latencyActivity == nil {
       latencyActivity = ProcessInfo.processInfo.beginActivity(
         options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
-        reason: "Helm controller and voice input"
+        reason: "GripPilot controller and voice input"
       )
     } else if !shouldRun, let latencyActivity {
       ProcessInfo.processInfo.endActivity(latencyActivity)
@@ -2302,7 +2302,7 @@ final class AppModel: ObservableObject {
         commitOnRelease: true,
         label: "界面测试"
       )
-      setStatus("外部应用未在 0.5 秒内恢复焦点；识别结果只会保留在 Helm 中。", log: true)
+      setStatus("外部应用未在 0.5 秒内恢复焦点；识别结果只会保留在 GripPilot 中。", log: true)
       return
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in

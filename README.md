@@ -1,9 +1,12 @@
-# Helm
+# GripPilot
 
-Helm is an experimental macOS control center that turns a PlayStation, Xbox,
-or Nintendo controller into one compact desktop controller.
+**One controller. Your whole Mac.** GripPilot turns a PlayStation, Xbox, or
+Nintendo controller into a compact macOS pointer, scroller, shortcut pad, and
+voice-input remote.
 
-![Helm DualSense control center](docs/reviews/helm-ui-preview.png)
+<p align="center">
+  <img src="macos-app/Resources/GripPilot-Icon-1024.png" width="180" alt="GripPilot app icon">
+</p>
 
 ## Controls
 
@@ -28,7 +31,7 @@ Any SDL-exposed controller button can be recorded as a single button or a
 combination of up to four buttons, then mapped to clicks, page navigation, PTT,
 or one of three configurable keyboard shortcuts. This includes the four paddle
 positions exposed for controllers such as Xbox Elite and DualSense Edge. The
-shortcut slots can invoke an external input method without bringing Helm to the
+shortcut slots can invoke an external input method without bringing GripPilot to the
 foreground. A slot may also be a held modifier-only action such as Command or
 Control, with independent left/right selection for Command, Control, Option,
 and Shift, so another input source can complete the chord. Recording or editing
@@ -53,7 +56,7 @@ Input processing is locked to a 240 Hz high-priority active cadence. A
 low-latency radial response floor, configurable response and smoothing
 curves, elapsed-time integration, and fractional continuous-pixel scrolling keep
 light stick input responsive without changing speed across variable frame
-intervals. Helm reads the current left stick, right stick, and triggers on every
+intervals. GripPilot reads the current left stick, right stick, and triggers on every
 cadence tick, so motion no longer depends on how frequently a particular axis
 happens to emit SDL events. Right-stick fractional scroll output is accumulated
 and rounded symmetrically, avoiding a full-point startup impulse followed by a
@@ -64,7 +67,7 @@ visible repayment pause.
 Optional semantic haptics acknowledge discrete actions such as clicks, page
 navigation, shortcuts, and PTT start/stop. They are off by default, use a
 conservative 35% initial intensity, and never run continuously for pointer or
-scroll movement. Helm checks SDL's whole-gamepad rumble capability at runtime;
+scroll movement. GripPilot checks SDL's whole-gamepad rumble capability at runtime;
 adaptive-trigger effects are intentionally a separate future feature. See the
 [haptic design and safety policy](docs/haptics.md).
 
@@ -72,7 +75,7 @@ adaptive-trigger effects are intentionally a separate future feature. See the
 
 - SDL-standard PS4/PS5, Xbox 360/One-class, Nintendo Switch Pro, and generic
   standard mappings are accepted; button labels follow each controller family.
-- When a controller is already connected as Helm launches, controls
+- When a controller is already connected as GripPilot launches, controls
   automatically enable by default after Accessibility is confirmed. This is a
   configurable one-shot launch action, so a later reconnect does not override a
   manual stop. Sleep/timer gaps, permission loss, disconnect, app termination,
@@ -86,7 +89,7 @@ adaptive-trigger effects are intentionally a separate future feature. See the
 - Recognized text first uses the focused Accessibility text element, then uses
   Unicode keyboard events for the confirmed external target when dynamic web
   editors reject direct AX insertion or expose a generic accessibility role.
-  Helm fixes the external process identity at PTT start, restores it before
+  GripPilot fixes the external process identity at PTT start, restores it before
   delivery, verifies that the focused Accessibility element belongs to that
   process, and
   only then posts the Unicode fallback through the global HID event path used by
@@ -94,7 +97,7 @@ adaptive-trigger effects are intentionally a separate future feature. See the
   fields are refused; the clipboard is never used as a fallback. Direct AX insertion is reported as confirmed;
   Unicode event delivery is explicitly reported as unconfirmed because the
   target application may ignore it. If the UI PTT action prevented an AX text
-  snapshot at capture time, Helm may recapture the currently focused element
+  snapshot at capture time, GripPilot may recapture the currently focused element
   only after the exact original process is frontmost again; an existing snapshot
   is never replaced by a later focus.
 
@@ -102,15 +105,15 @@ adaptive-trigger effects are intentionally a separate future feature. See the
 
 The controller microphone/share/capture button can be used as the voice control
 in button mode.
-Audio is captured from the macOS input explicitly selected in Helm. On the
-target Mac, a wired DualSense currently enumerates as a 48 kHz USB input. Helm
+Audio is captured from the macOS input explicitly selected in GripPilot. On the
+target Mac, a wired DualSense currently enumerates as a 48 kHz USB input. GripPilot
 recognizes that route and tolerates one bounded HID re-enumeration without
 cancelling active recognition; Bluetooth controller audio is not used as a
 music-safe input route. Controller PTT remains active when desktop mouse/key
 injection is disabled, so the external text field can keep focus throughout.
 
 Playback protection is enabled by default. If the system default input is a
-Bluetooth headset microphone, Helm selects a built-in or USB input instead;
+Bluetooth headset microphone, GripPilot selects a built-in or USB input instead;
 opening a classic Bluetooth microphone can switch the headset into its call
 profile and interrupt or degrade music. The protection can be disabled
 explicitly when that tradeoff is desired. Enabling protection during an active
@@ -128,9 +131,9 @@ The current Demo is ad-hoc signed for local development. Real controller,
 Accessibility, and speech behavior should be validated on the target Mac before
 relying on it for everyday use.
 
-When a completed transcript remains in Helm because the destination did not
+When a completed transcript remains in GripPilot because the destination did not
 accept automatic delivery, activate the intended external text field again,
-return to Helm, and choose **重新发送到外部焦点**. The post-recognition
+return to GripPilot, and choose **重新发送到外部焦点**. The post-recognition
 activation is consumed once, and the process PID plus launch time is checked on
 every retry to reject PID reuse. The recovery action otherwise reuses the same
 Accessibility, secure-input, and bounded-retry checks; it does not record audio
@@ -186,7 +189,9 @@ macos-app/scripts/build-and-install.sh --launch
 The script runs the deterministic control-math/audio tests plus an isolated SDL
 virtual-gamepad analog-read integration test, compiles Swift and C with warnings treated as errors, embeds SDL3 and the pinned Sparkle framework,
 applies a stable local-development ad-hoc requirement, and installs to
-`~/Applications/Helm Demo.app`. Updates keep that top-level app directory in
+`~/Applications/Helm Demo.app`. The legacy on-disk bundle name is deliberately
+retained for update and macOS privacy-permission continuity; Finder and the app
+UI display **GripPilot**. Updates keep that top-level app directory in
 place, transactionally replace only `Contents`, verify the installed copy, and
 remove the temporary rollback immediately after success. Moving an older build onto this stable identity
 can require one final Accessibility/Microphone/Speech grant; subsequent local
@@ -213,13 +218,13 @@ final verification.
 
 ## Privacy permissions
 
-Helm does not request privacy permissions at launch. Use the visible permission
+GripPilot does not request privacy permissions at launch. Use the visible permission
 buttons when you are ready, complete the macOS System Settings flow, return to
-Helm, and select **Refresh**.
+GripPilot, and select **Refresh**.
 
 ## License
 
-Helm source code is available under the [MIT License](LICENSE). SDL3 is a
+GripPilot source code is available under the [MIT License](LICENSE). SDL3 is a
 separate dependency distributed under the zlib license; Sparkle is a separate
 dependency distributed under the MIT license. Their binary frameworks are not
 committed to this repository.

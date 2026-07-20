@@ -105,6 +105,7 @@ bash "$app_root/Tests/local-update-identity-tests.sh"
 bash "$app_root/Tests/in-place-install-tests.sh"
 bash "$app_root/Tests/prominent-update-control-tests.sh"
 bash "$app_root/Tests/voice-input-mode-contract-tests.sh"
+bash "$app_root/Tests/brand-identity-contract-tests.sh"
 
 xcrun clang \
     -std=c11 \
@@ -179,6 +180,8 @@ xcrun swiftc \
 ditto "$vendor_framework" "$staged_app/Contents/Frameworks/SDL3.framework"
 ditto "$sparkle_framework" "$staged_app/Contents/Frameworks/Sparkle.framework"
 ditto "$app_root/Resources/Info.plist" "$staged_app/Contents/Info.plist"
+ditto "$app_root/Resources/GripPilot.icns" \
+    "$staged_app/Contents/Resources/GripPilot.icns"
 if [[ -f "$vendor_framework/Resources/LICENSE.txt" ]]; then
     ditto "$vendor_framework/Resources/LICENSE.txt" "$staged_app/Contents/Resources/SDL3-LICENSE.txt"
 fi
@@ -202,7 +205,7 @@ if pgrep -x HelmDemo >/dev/null 2>&1; then
         sleep 1
     done
     if pgrep -x HelmDemo >/dev/null 2>&1; then
-        echo "Helm Demo is still running; stop it from the menu bar and retry." >&2
+        echo "GripPilot is still running; stop it from the menu bar and retry." >&2
         exit 3
     fi
 fi

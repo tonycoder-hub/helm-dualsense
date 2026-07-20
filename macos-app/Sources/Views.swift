@@ -58,7 +58,7 @@ struct ControlCenterView: View {
       .frame(width: 54, height: 54)
 
       VStack(alignment: .leading, spacing: 3) {
-        Text("Helm")
+        Text("GripPilot")
           .font(.system(size: 27, weight: .bold, design: .rounded))
         Text("PlayStation / Xbox / Nintendo · 鼠标 · 滚动 · 语音输入")
           .foregroundStyle(.secondary)
@@ -69,7 +69,7 @@ struct ControlCenterView: View {
         .controlSize(.small)
         .disabled(!model.canCheckForUpdates)
         .help(model.updateChannelLabel)
-      Text("DEMO 0.10.1")
+      Text("0.11.0")
         .font(.caption.weight(.bold))
         .foregroundStyle(helmAccent)
         .padding(.horizontal, 10)
@@ -532,7 +532,7 @@ struct ControlCenterView: View {
             .font(.caption)
             .foregroundStyle(model.canRetryExternalTextDelivery ? helmAccent : .secondary)
             .disabled(!model.canRetryExternalTextDelivery)
-            .help("识别完成后重新聚焦外部文本框，再返回 Helm 点击；会复用自动写入的目标校验")
+            .help("识别完成后重新聚焦外部文本框，再返回 GripPilot 点击；会复用自动写入的目标校验")
           Button("清空") { model.clearTranscript() }
             .buttonStyle(.plain)
             .font(.caption)
@@ -548,7 +548,7 @@ struct ControlCenterView: View {
       HStack {
         Image(systemName: "info.circle")
         if model.selectedAudioDevice?.isControllerRoutedUSB == true {
-          Text("已选中手柄的 USB 音频输入。启动采集时若 HID 短暂重枚举，Helm 会保留语音并在同一手柄恢复后继续控制。")
+          Text("已选中手柄的 USB 音频输入。启动采集时若 HID 短暂重枚举，GripPilot 会保留语音并在同一手柄恢复后继续控制。")
         } else {
           Text("有线 DualSense 在这台 Mac 上可枚举为 48 kHz USB 输入；蓝牙手柄音频仍不会作为安全的音乐共存路径。实际音源以顶部选择为准。")
         }
@@ -559,7 +559,7 @@ struct ControlCenterView: View {
       Text("按键模式独立于“桌面控制”开关；常开会安全分段并在确认写入后继续监听，常闭会立即取消采集和待投递文本。")
         .font(.caption)
         .foregroundStyle(.tertiary)
-      Text("若自动写入未出现：识别完成后重新在目标文本框点一下，返回 Helm 点击“重新发送到外部焦点”；这不会重新录音。")
+      Text("若自动写入未出现：识别完成后重新在目标文本框点一下，返回 GripPilot 点击“重新发送到外部焦点”；这不会重新录音。")
         .font(.caption)
         .foregroundStyle(.tertiary)
     }
@@ -616,7 +616,7 @@ struct MenuBarPanel: View {
       HStack {
         Image(systemName: model.controllerSystemImage)
           .foregroundStyle(helmAccent)
-        Text("Helm")
+        Text("GripPilot")
           .font(.headline)
         Spacer()
         Circle()
@@ -657,7 +657,7 @@ struct MenuBarPanel: View {
         openWindow(id: "control-center")
         NSApp.activate(ignoringOtherApps: true)
       }
-      Button("退出 Helm") {
+      Button("退出 GripPilot") {
         model.shutdown()
         NSApp.terminate(nil)
       }
