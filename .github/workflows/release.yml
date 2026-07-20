@@ -157,12 +157,12 @@ jobs:
           set -euo pipefail
           [[ -n $SPARKLE_PRIVATE_KEY ]]
           release_dir="$RUNNER_TEMP/helm-release"
-          archive="$release_dir/Helm-Demo-$VERSION.zip"
+          archive="$release_dir/GripPilot-$VERSION.zip"
           mkdir -p "$release_dir"
           ditto -c -k --sequesterRsrc --keepParent \
             'macos-app/.build/Helm Demo.app' "$archive"
-          printf 'Helm %s (build %s)\n' "$VERSION" "$BUILD" \
-            > "$release_dir/Helm-Demo-$VERSION.md"
+          printf 'GripPilot %s (build %s)\n\nThe visible name is now GripPilot. The existing Helm Demo.app bundle path stays unchanged so in-place updates can retain macOS permissions and settings.\n' "$VERSION" "$BUILD" \
+            > "$release_dir/GripPilot-$VERSION.md"
           printf '%s' "$SPARKLE_PRIVATE_KEY" | \
             "$RUNNER_TEMP/sparkle-distribution/bin/generate_appcast" \
               --ed-key-file - \
@@ -191,5 +191,6 @@ jobs:
             "$RELEASE_DIR/SHA256SUMS" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Helm $VERSION" \
+            --title "GripPilot $VERSION" \
+            --notes "GripPilot is the new visible product name. The existing Helm Demo.app bundle path remains unchanged for in-place update and macOS permission continuity." \
             --generate-notes

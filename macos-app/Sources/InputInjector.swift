@@ -246,7 +246,7 @@ enum InputInjector {
       return .result(.refused("没有可写入的识别文本"))
     }
     guard accessibilityTrusted() else {
-      return .result(.refused("缺少辅助功能权限，文本只保留在 Helm 中"))
+      return .result(.refused("缺少辅助功能权限，文本只保留在 GripPilot 中"))
     }
     let secureInputEnabled = HelmSecureInputEnabled()
     guard focusSnapshot.processIdentifier > 0,

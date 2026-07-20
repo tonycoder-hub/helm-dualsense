@@ -1,0 +1,67 @@
+{
+  "config": {
+    "wide_screen_mode": true,
+    "enable_forward": true
+  },
+  "header": {
+    "template": "turquoise",
+    "title": {
+      "tag": "plain_text",
+      "content": "GripPilot｜一柄掌控 Mac"
+    }
+  },
+  "elements": [
+    {
+      "tag": "img",
+      "img_key": "{{GRIPPILOT_ICON_IMAGE_KEY}}",
+      "alt": {
+        "tag": "plain_text",
+        "content": "GripPilot App 图标"
+      },
+      "mode": "fit_horizontal"
+    },
+    {
+      "tag": "markdown",
+      "content": "🎮 **把手柄变成你的 Mac 遥控台**\n\nDualSense、Xbox 和 Nintendo 手柄，一次接管光标、滚动、快捷键与语音输入。"
+    },
+    {
+      "tag": "hr"
+    },
+    {
+      "tag": "markdown",
+      "content": "**240 Hz 独立驱动**　左右摇杆持续采样，光标与滚动更丝滑\n\n**赛车式速度控制**　L2 刹车、R2 加速，长推摇杆按曲线提速\n\n**语音三种模式**　按键说话 / 常开 / 常闭，支持有线 DualSense 麦克风\n\n**自由按键映射**　单键、组合键、左右修饰键及专业手柄背键\n\n**原地安全更新**　GitHub Release + Sparkle，保留既有权限与配置"
+    },
+    {
+      "tag": "action",
+      "actions": [
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "下载 GripPilot 0.11.0"
+          },
+          "type": "primary",
+          "url": "https://github.com/tonycoder-hub/helm-dualsense/releases/tag/v0.11.0"
+        },
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "查看开源项目"
+          },
+          "type": "default",
+          "url": "https://github.com/tonycoder-hub/helm-dualsense"
+        }
+      ]
+    },
+    {
+      "tag": "note",
+      "elements": [
+        {
+          "tag": "plain_text",
+          "content": "macOS 14+ · PlayStation / Xbox / Nintendo · 开源 Demo"
+        }
+      ]
+    }
+  ]
+}
