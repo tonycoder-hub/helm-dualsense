@@ -10,10 +10,12 @@ source_dir="$app_root/Sources"
 build_dir="$app_root/.build"
 vendor_framework=${HELM_SDL3_FRAMEWORK:-"$app_root/.vendor/SDL3.framework"}
 sparkle_framework=${HELM_SPARKLE_FRAMEWORK:-"$app_root/.vendor/Sparkle.framework"}
-bundle_name="Helm Demo.app"
+bundle_name="GripPilot.app"
+legacy_bundle_name="Helm Demo.app"
 staged_app="$build_dir/$bundle_name"
 install_root="$HOME/Applications"
 installed_app="$install_root/$bundle_name"
+legacy_installed_app="$install_root/$legacy_bundle_name"
 sdk=$(xcrun --show-sdk-path)
 architecture=$(uname -m)
 
@@ -101,8 +103,18 @@ xcrun swiftc \
     -o "$build_dir/MotionSamplingDriverTests"
 "$build_dir/MotionSamplingDriverTests"
 
+xcrun swiftc \
+    -swift-version 5 \
+    -warnings-as-errors \
+    -parse-as-library \
+    "$source_dir/PermissionRequestActionPolicy.swift" \
+    "$app_root/Tests/PermissionRequestActionPolicyTests.swift" \
+    -o "$build_dir/PermissionRequestActionPolicyTests"
+"$build_dir/PermissionRequestActionPolicyTests"
+
 bash "$app_root/Tests/local-update-identity-tests.sh"
 bash "$app_root/Tests/in-place-install-tests.sh"
+bash "$app_root/Tests/bundle-path-migration-tests.sh"
 bash "$app_root/Tests/prominent-update-control-tests.sh"
 bash "$app_root/Tests/voice-input-mode-contract-tests.sh"
 bash "$app_root/Tests/brand-identity-contract-tests.sh"
@@ -210,6 +222,8 @@ if pgrep -x HelmDemo >/dev/null 2>&1; then
     fi
 fi
 
+helm_migrate_legacy_app_path \
+    "$legacy_installed_app" "$installed_app" helm_verify_local_app_identity
 helm_install_app_contents "$staged_app" "$installed_app" helm_verify_local_app_identity
 echo "INSTALLED_APP=$installed_app"
 echo "BUNDLE_ID=$(defaults read "$installed_app/Contents/Info.plist" CFBundleIdentifier)"

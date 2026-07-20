@@ -526,13 +526,25 @@ enum InputInjector {
     return displays.prefix(Int(writtenCount)).map(CGDisplayBounds)
   }
 
-  static func openAccessibilitySettings() {
-    guard
-      let url = URL(
-        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-      )
-    else { return }
-    NSWorkspace.shared.open(url)
+  @discardableResult
+  static func openAccessibilitySettings() -> Bool {
+    openSystemSettings(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    )
+  }
+
+  @discardableResult
+  static func openMicrophoneSettings() -> Bool {
+    openSystemSettings(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+    )
+  }
+
+  @discardableResult
+  static func openSpeechRecognitionSettings() -> Bool {
+    openSystemSettings(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+    )
   }
 
   static func openSoundSettings() {
@@ -541,5 +553,14 @@ enum InputInjector {
       return
     }
     NSWorkspace.shared.open(url)
+  }
+
+  private static func openSystemSettings(_ urlString: String) -> Bool {
+    if let url = URL(string: urlString), NSWorkspace.shared.open(url) {
+      return true
+    }
+    return NSWorkspace.shared.open(
+      URL(fileURLWithPath: "/System/Applications/System Settings.app")
+    )
   }
 }

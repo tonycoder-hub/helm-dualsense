@@ -189,11 +189,13 @@ macos-app/scripts/build-and-install.sh --launch
 The script runs the deterministic control-math/audio tests plus an isolated SDL
 virtual-gamepad analog-read integration test, compiles Swift and C with warnings treated as errors, embeds SDL3 and the pinned Sparkle framework,
 applies a stable local-development ad-hoc requirement, and installs to
-`~/Applications/Helm Demo.app`. The legacy on-disk bundle name is deliberately
-retained for update and macOS privacy-permission continuity; Finder and the app
-UI display **GripPilot**. Updates keep that top-level app directory in
-place, transactionally replace only `Contents`, verify the installed copy, and
-remove the temporary rollback immediately after success. Moving an older build onto this stable identity
+`~/Applications/GripPilot.app`. The first 0.11.1 local install migrates an
+existing `Helm Demo.app` directory to that name in place before replacing its
+contents, so it does not leave a duplicate app behind. The one-time path change
+can require Accessibility/Microphone/Speech authorization again. Later updates
+keep the `GripPilot.app` directory in place, transactionally replace only
+`Contents`, verify the installed copy, and remove the temporary rollback
+immediately after success. Moving an older build onto this stable identity
 can require one final Accessibility/Microphone/Speech grant; subsequent local
 builds keep the same designated requirement at the same path. On the target Mac,
 six observed updates from build 11 through build 17 each changed the app
@@ -201,6 +203,12 @@ CDHash while preserving the app-directory inode and designated requirement;
 Accessibility, Microphone, and Speech all remained authorized after every
 relaunch. That evidence is scoped to this local Demo identity and does not claim
 the same behavior for a future Developer ID distribution.
+
+Fresh 0.11.1 downloads contain `GripPilot.app`. Sparkle can validate the new
+archive by its unchanged bundle identifier, but Sparkle 2.9.4 preserves the
+path of an already installed app; an older `Helm Demo.app` updated only through
+Sparkle therefore keeps that filesystem name. Run the local installer once when
+an in-place path migration is desired.
 
 The Demo embeds the dedicated public update key and a stable GitHub Releases
 feed URL, requires pre-extraction verification, and permanently fails closed on
@@ -221,6 +229,11 @@ final verification.
 GripPilot does not request privacy permissions at launch. Use the visible permission
 buttons when you are ready, complete the macOS System Settings flow, return to
 GripPilot, and select **Refresh**.
+Microphone and Speech use their native request dialogs only while their state is
+undetermined; later decisions open the matching System Settings page.
+Accessibility first asks macOS when the app is not trusted and opens its
+Settings page if trust is still absent. An already trusted app opens Settings
+directly, so permission management never becomes a silent no-op.
 
 ## License
 

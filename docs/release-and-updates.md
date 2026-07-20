@@ -1,9 +1,9 @@
 # Release and updates
 
-Helm has two deliberately separate release tracks:
+GripPilot has two deliberately separate release tracks:
 
 - **Public Demo:** a manually dispatched GitHub Release built from protected
-  `main`. It publishes an ad-hoc-signed `Helm Demo.app` ZIP, a Sparkle-signed
+  `main`. It publishes an ad-hoc-signed `GripPilot.app` ZIP, a Sparkle-signed
   appcast, and SHA-256 manifest. It is suitable for testing, but it is neither
   Developer ID signed nor notarized.
 - **Formal distribution:** the future `Helm.app` product. It must not be
@@ -39,9 +39,15 @@ that bootstrap.
 
 ## Formal release boundary
 
-The first supported release should be an Apple-silicon `Helm.app` with a stable
-bundle identifier and executable name. Renaming `Helm Demo.app` is an explicit
-one-time boundary; update artifacts must keep the formal name afterward.
+The public Demo crossed its explicit one-time package-path boundary in 0.11.1:
+the local installer migrates `Helm Demo.app` to `GripPilot.app` in place, while
+the bundle identifier and executable name stay stable. Future public update
+artifacts must keep `GripPilot.app`. Sparkle 2.9.4 locates a differently named
+incoming bundle by its unchanged identifier, then intentionally installs it at
+the current host path; a Sparkle-only upgrade from an older build therefore
+keeps `Helm Demo.app`. Fresh downloads and repository-local installs use
+`GripPilot.app`. The separate formal-distribution scripts still describe a
+future Developer ID product and remain blocked until all formal gates pass.
 
 The local development installer and public Demo workflow stay separate from the
 formal release path. Both may use the stable ad-hoc Demo identity, but neither

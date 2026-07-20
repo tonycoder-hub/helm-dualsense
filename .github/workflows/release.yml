@@ -160,8 +160,8 @@ jobs:
           archive="$release_dir/GripPilot-$VERSION.zip"
           mkdir -p "$release_dir"
           ditto -c -k --sequesterRsrc --keepParent \
-            'macos-app/.build/Helm Demo.app' "$archive"
-          printf 'GripPilot %s (build %s)\n\nThe visible name is now GripPilot. The existing Helm Demo.app bundle path stays unchanged so in-place updates can retain macOS permissions and settings.\n' "$VERSION" "$BUILD" \
+            'macos-app/.build/GripPilot.app' "$archive"
+          printf 'GripPilot %s (build %s)\n\nFresh downloads now contain GripPilot.app. Running the repository local installer migrates an existing Helm Demo.app in place and macOS may request permissions again after that one-time path change. Sparkle upgrades preserve an existing installation path by design. Permission buttons now open the relevant System Settings page whenever macOS already has a decision instead of silently repeating a no-op request.\n' "$VERSION" "$BUILD" \
             > "$release_dir/GripPilot-$VERSION.md"
           printf '%s' "$SPARKLE_PRIVATE_KEY" | \
             "$RUNNER_TEMP/sparkle-distribution/bin/generate_appcast" \
@@ -192,5 +192,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "GripPilot $VERSION" \
-            --notes "GripPilot is the new visible product name. The existing Helm Demo.app bundle path remains unchanged for in-place update and macOS permission continuity." \
+            --notes "Fresh downloads now contain GripPilot.app. Running the repository local installer migrates an existing Helm Demo.app in place; Sparkle upgrades preserve an existing installation path by design. macOS may request permissions again after the one-time local path change. Permission buttons now open the relevant System Settings page when macOS already has a permission decision." \
             --generate-notes
